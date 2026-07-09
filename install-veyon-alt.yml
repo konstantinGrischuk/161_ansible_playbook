@@ -1,0 +1,94 @@
+---
+- name: Install and configure Veyon on ALT Linux
+  hosts: veyon_clients
+  become: yes
+  vars:
+    proxy_address: "http://10.0.2.52:3128"
+    veyon_ports:
+      - 11100
+      - 11101
+      - 11400
+    is_master: false  # true для компьютера учителя
+
+  tasks:
+    # ----- УДАЛЕНИЕ КОНФЛИКТУЮЩЕГО iTALC -----
+    - name: Check for italc3-client conflict
+      ansible.builtin.command:
+        cmd: rpm -qa | grep italc3-client
+      register: italc_installed
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Remove conflicting italc3-client
+      ansible.builtin.command:
+        cmd: apt-get remove -y italc3-client
+      when: italc_installed.stdout != ""
+      changed_when: false
+
+    # ----- УСТАНОВКА VEYON -----
+    - name: Update cache and install Veyon
+      ansible.builtin.shell: |
+        export http_proxy={{ proxy_address }}
+        export https_proxy={{ proxy_address }}
+        apt-get update
+        apt-get install -y veyon
+      args:
+        executable: /bin/bash
+      register: install_result
+      changed_when: false
+
+    - name: Show installation result
+      ansible.builtin.debug:
+        msg: "{{ install_result.stdout_lines[-5:] }}"
+
+    # ----- НАСТРОЙКА ФАЙРВОЛА (NFTABLES) -----
+    - name: Open Veyon ports with nftables
+      ansible.builtin.shell: |
+        nft add rule inet filter input tcp dport { {{ veyon_ports | join(', ') }} } accept 2>/dev/null || true
+      changed_when: false
+      ignore_errors: yes
+
+    # ----- КЛЮЧИ АУТЕНТИФИКАЦИИ ДЛЯ УЧИТЕЛЯ -----
+    - name: Create teacher authentication keys (master only)
+      ansible.builtin.command:
+        cmd: veyon-cli authkeys create teacher
+      when: is_master | bool
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Set authentication method to key-based (master only)
+      ansible.builtin.command:
+        cmd: veyon-cli config set Authentication/Method 1
+      when: is_master | bool
+      changed_when: false
+
+    # ----- ЗАПУСК СЛУЖБЫ -----
+    - name: Find and start Veyon service
+      ansible.builtin.shell: |
+        service_name=$(systemctl list-unit-files | grep -i veyon | awk '{print $1}' | head -1)
+        if [ -n "$service_name" ]; then
+          systemctl start $service_name
+          systemctl enable $service_name
+          echo $service_name
+        else
+          echo "NOT FOUND"
+        fi
+      register: service_result
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show service name
+      ansible.builtin.debug:
+        msg: "Veyon service: {{ service_result.stdout }}"
+
+    # ----- ПРОВЕРКА -----
+    - name: Check Veyon version
+      ansible.builtin.command:
+        cmd: veyon-cli --version
+      register: version_result
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show version
+      ansible.builtin.debug:
+        msg: "Veyon version: {{ version_result.stdout if version_result.stdout else 'NOT INSTALLED' }}"
