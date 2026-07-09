@@ -1,0 +1,158 @@
+---
+- name: Configure proxy, DNS, APT and environment on ALT Linux clients
+  hosts: all  # Примените к нужной группе хостов
+  become: yes
+
+  vars:
+    # ----- НАСТРОЙКИ (ИЗМЕНИТЕ ПОД СЕБЯ) -----
+    proxy_address: "http://10.0.2.52:3128"        # Адрес прокси-сервера
+    no_proxy_list: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc" # Исключения для прокси
+    dns_server: "10.205.112.8"                   # Адрес DNS-сервера
+    dns_search_domain: "licey.loc"               # Домен поиска DNS
+    network_config_file: /etc/sysconfig/network  # Файл системных переменных в ALT Linux
+
+  tasks:
+    # ----- АВТООПРЕДЕЛЕНИЕ СЕТЕВОГО ИНТЕРФЕЙСА -----
+    - name: Get default network interface name
+      ansible.builtin.set_fact:
+        interface: "{{ ansible_default_ipv4.interface }}"
+      when: interface is not defined
+
+    - name: Show detected interface
+      ansible.builtin.debug:
+        msg: "Detected network interface: {{ interface }}"
+
+    # ----- ПРОКСИ В /etc/sysconfig/network -----
+    - name: Add or update HTTP_PROXY
+      ansible.builtin.lineinfile:
+        path: "{{ network_config_file }}"
+        regexp: '^HTTP_PROXY='
+        line: "HTTP_PROXY={{ proxy_address }}"
+
+    - name: Add or update HTTPS_PROXY
+      ansible.builtin.lineinfile:
+        path: "{{ network_config_file }}"
+        regexp: '^HTTPS_PROXY='
+        line: "HTTPS_PROXY={{ proxy_address }}"
+
+    - name: Add or update FTP_PROXY
+      ansible.builtin.lineinfile:
+        path: "{{ network_config_file }}"
+        regexp: '^FTP_PROXY='
+        line: "FTP_PROXY={{ proxy_address }}"
+
+    - name: Add or update NO_PROXY
+      ansible.builtin.lineinfile:
+        path: "{{ network_config_file }}"
+        regexp: '^NO_PROXY='
+        line: "NO_PROXY={{ no_proxy_list }}"
+
+    # ----- ПРОКСИ ДЛЯ APT -----
+    - name: Ensure apt proxy directory exists
+      ansible.builtin.file:
+        path: /etc/apt/apt.conf.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure apt proxy
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/01proxy
+        content: |
+          Acquire::http::Proxy "{{ proxy_address }}";
+          Acquire::https::Proxy "{{ proxy_address }}";
+          Acquire::ftp::Proxy "{{ proxy_address }}";
+          Acquire::ForceIPv4 "true";
+        mode: '0644'
+
+    - name: Disable IPv6 for APT
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99disable-ipv6
+        content: |
+          APT::Get::AllowIPv6 "false";
+          Acquire::AllowIPv6 "false";
+        mode: '0644'
+
+    # ----- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ -----
+    - name: Create environment proxy script
+      ansible.builtin.copy:
+        dest: /etc/profile.d/proxy.sh
+        content: |
+          export http_proxy={{ proxy_address }}
+          export https_proxy={{ proxy_address }}
+          export ftp_proxy={{ proxy_address }}
+          export HTTP_PROXY={{ proxy_address }}
+          export HTTPS_PROXY={{ proxy_address }}
+          export FTP_PROXY={{ proxy_address }}
+          export no_proxy={{ no_proxy_list }}
+          export NO_PROXY={{ no_proxy_list }}
+        mode: '0755'
+
+    # ----- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ДЛЯ ROOT -----
+    - name: Add proxy settings to root .bashrc
+      ansible.builtin.lineinfile:
+        path: /root/.bashrc
+        line: |
+          export http_proxy={{ proxy_address }}
+          export https_proxy={{ proxy_address }}
+          export ftp_proxy={{ proxy_address }}
+          export HTTP_PROXY={{ proxy_address }}
+          export HTTPS_PROXY={{ proxy_address }}
+          export FTP_PROXY={{ proxy_address }}
+          export no_proxy={{ no_proxy_list }}
+          export NO_PROXY={{ no_proxy_list }}
+        create: yes
+
+    # ----- НАСТРОЙКА DNS В ALT LINUX -----
+    - name: Ensure interface directory exists
+      ansible.builtin.file:
+        path: "/etc/net/ifaces/{{ interface }}"
+        state: directory
+        mode: '0755'
+
+    - name: Configure DNS in ALT Linux interface resolv.conf
+      ansible.builtin.copy:
+        dest: "/etc/net/ifaces/{{ interface }}/resolv.conf"
+        content: |
+          search {{ dns_search_domain }}
+          nameserver {{ dns_server }}
+        mode: '0644'
+        backup: yes
+
+    - name: Regenerate main resolv.conf using resolvconf
+      ansible.builtin.command:
+        cmd: /sbin/resolvconf -u
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Alternative regenerate resolv.conf
+      ansible.builtin.command:
+        cmd: /sbin/resolvconf -i
+      changed_when: false
+      ignore_errors: yes
+
+    # ----- ОБНОВЛЕНИЕ APT С ПРОКСИ -----
+    - name: Run apt-get update with proxy environment
+      ansible.builtin.command:
+        cmd: apt-get update
+      environment:
+        http_proxy: "{{ proxy_address }}"
+        https_proxy: "{{ proxy_address }}"
+      register: apt_update
+      changed_when: false
+
+    - name: Show apt update status
+      ansible.builtin.debug:
+        msg: "APT Update Status: {{ 'SUCCESS' if apt_update.rc == 0 else 'FAILED' }}"
+
+    # ----- ФИНАЛЬНОЕ СООБЩЕНИЕ -----
+    - name: Show completion message
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          PROXY, DNS, APT AND ENVIRONMENT CONFIGURED SUCCESSFULLY
+          ==========================================
+          Interface: {{ interface }}
+          Proxy: {{ proxy_address }}
+          DNS: {{ dns_server }}
+          Search domain: {{ dns_search_domain }}
+          ==========================================
