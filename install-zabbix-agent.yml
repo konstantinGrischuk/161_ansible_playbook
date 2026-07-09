@@ -1,0 +1,108 @@
+---
+- name: Install Zabbix Agent for Linux (ALT Linux / Debian)
+  hosts: zabbix_clients
+  become: yes
+  vars:
+    proxy_address: "http://10.0.2.52:3128"
+    zabbix_server: "10.205.112.6"
+
+  tasks:
+    # ----- ОБНОВЛЕНИЕ КЭША APT -----
+    - name: Update apt cache with proxy (ALT Linux)
+      ansible.builtin.command:
+        cmd: apt-get update
+      environment:
+        http_proxy: "{{ proxy_address }}"
+        https_proxy: "{{ proxy_address }}"
+      changed_when: false
+      when: ansible_os_family == "Altlinux"
+
+    - name: Update apt cache with proxy (Debian/Proxmox)
+      ansible.builtin.apt:
+        update_cache: yes
+      environment:
+        http_proxy: "{{ proxy_address }}"
+        https_proxy: "{{ proxy_address }}"
+      when: ansible_os_family == "Debian"
+
+    # ----- УСТАНОВКА ZABBIX AGENT -----
+    - name: Install Zabbix Agent (ALT Linux)
+      ansible.builtin.command:
+        cmd: apt-get install -y zabbix-agent
+      environment:
+        http_proxy: "{{ proxy_address }}"
+        https_proxy: "{{ proxy_address }}"
+      changed_when: false
+      when: ansible_os_family == "Altlinux"
+
+    - name: Install Zabbix Agent (Debian/Proxmox)
+      ansible.builtin.apt:
+        name: zabbix-agent
+        state: present
+      environment:
+        http_proxy: "{{ proxy_address }}"
+        https_proxy: "{{ proxy_address }}"
+      when: ansible_os_family == "Debian"
+
+    # ----- КОНФИГУРАЦИЯ ZABBIX AGENT -----
+    - name: Configure Zabbix Server address
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Server='
+        line: 'Server={{ zabbix_server }}'
+
+    - name: Configure Zabbix ServerActive address
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^ServerActive='
+        line: 'ServerActive={{ zabbix_server }}'
+
+    - name: Configure Hostname
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Hostname='
+        line: 'Hostname={{ ansible_hostname }}'
+
+    - name: Create run directory for PID file (ALT Linux)
+      ansible.builtin.file:
+        path: /run/zabbix
+        state: directory
+        owner: zabbix
+        group: zabbix
+        mode: '0755'
+      when: ansible_os_family == "Altlinux"
+
+    - name: Create log directory (ALT Linux)
+      ansible.builtin.file:
+        path: /var/log/zabbix
+        state: directory
+        owner: zabbix
+        group: zabbix
+        mode: '0755'
+      when: ansible_os_family == "Altlinux"
+
+    # ----- ЗАПУСК СЛУЖБЫ -----
+    - name: Start and enable zabbix_agentd (ALT Linux)
+      ansible.builtin.systemd:
+        name: zabbix_agentd
+        state: restarted
+        enabled: yes
+      when: ansible_os_family == "Altlinux"
+
+    - name: Start and enable zabbix-agent (Debian/Proxmox)
+      ansible.builtin.systemd:
+        name: zabbix-agent
+        state: restarted
+        enabled: yes
+      when: ansible_os_family == "Debian"
+
+    # ----- ПРОВЕРКА -----
+    - name: Check zabbix process
+      ansible.builtin.shell: ps aux | grep zabbix_agentd | grep -v grep
+      register: ps_check
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Show status
+      ansible.builtin.debug:
+        msg: "Zabbix Agent: {{ 'RUNNING' if ps_check.stdout else 'NOT RUNNING' }}"
