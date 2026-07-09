@@ -18,13 +18,7 @@
       register: italc_installed
       changed_when: false
       ignore_errors: yes
-
-    - name: Remove conflicting italc3-client
-      ansible.builtin.command:
-        cmd: apt-get remove -y italc3-client
-      when: italc_installed.stdout != ""
-      changed_when: false
-
+      
     # ----- УСТАНОВКА VEYON -----
     - name: Update cache and install Veyon
       ansible.builtin.shell: |
