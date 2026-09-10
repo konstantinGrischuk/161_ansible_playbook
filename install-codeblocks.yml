@@ -1,0 +1,25 @@
+---
+- name: Install Code::Blocks on 403 group PCs
+  hosts: "403"
+  gather_facts: false
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install codeblocks
+      ansible.builtin.apt:
+        name: codeblocks
+        state: present
+
+    - name: Check that codeblocks is installed
+      ansible.builtin.command: dpkg-query -W -f='${Version}' codeblocks
+      register: cb_ver
+      changed_when: false
+      failed_when: cb_ver.rc != 0
+
+    - name: Show codeblocks version
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} codeblocks={{ cb_ver.stdout }}"
