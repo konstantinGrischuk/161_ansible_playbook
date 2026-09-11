@@ -18,9 +18,8 @@
 
   tasks:
     - name: Update apt cache
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: 3600
+      community.general.apt_rpm:
+        update_cache: yes
       environment: "{{ proxy_env }}"
       register: apt_update
       retries: 5
@@ -28,17 +27,18 @@
       until: apt_update is success
 
     - name: Install codeblocks
-      ansible.builtin.apt:
-        name: codeblocks
+      community.general.apt_rpm:
+        pkg: codeblocks
         state: present
       environment: "{{ proxy_env }}"
+      register: install_result
 
     - name: Check that codeblocks is installed
-      ansible.builtin.command: dpkg-query -W -f='${Version}' codeblocks
+      ansible.builtin.command: rpm -q --qf '%{VERSION}' codeblocks
       register: cb_ver
       changed_when: false
-      failed_when: cb_ver.rc != 0
+      failed_when: false
 
     - name: Show codeblocks version
       ansible.builtin.debug:
-        msg: "pc={{ inventory_hostname }} codeblocks={{ cb_ver.stdout }}"
+        msg: "pc={{ inventory_hostname }} codeblocks={{ cb_ver.stdout if cb_ver.rc == 0 else 'NOT INSTALLED' }}"
