@@ -9,27 +9,19 @@
   ignore_unreachable: yes
 
   tasks:
-    - name: Check that /etc/apt/sources.list.d exists
-      stat:
-        path: /etc/apt/sources.list.d
-      register: apt_sources_dir
-
-    - name: Skip hosts without APT
-      meta: end_host
-      when: not apt_sources_dir.stat.exists
-
     - name: Find all .list files in /etc/apt/sources.list.d
       find:
         paths: /etc/apt/sources.list.d
         patterns: '*.list'
       register: list_files
+      failed_when: false
 
     - name: Replace http://ftp.altlinux.org with https:// in .list files
       replace:
         path: "{{ item.path }}"
         regexp: 'http://ftp\.altlinux\.org'
         replace: 'https://ftp.altlinux.org'
-      loop: "{{ list_files.files }}"
+      loop: "{{ list_files.files | default([]) }}"
       register: replace_results
 
     - name: Replace in /etc/apt/sources.list (if exists)
@@ -44,10 +36,9 @@
       debug:
         msg: >-
           Changed: {{
-            (replace_results.results | selectattr('changed') | map(attribute='item.path') | list)
-            + (['/etc/apt/sources.list'] if replace_main.changed else [])
+            (replace_results.results | default([]) | selectattr('changed') | map(attribute='item.path') | list)
+            + (['/etc/apt/sources.list'] if (replace_main.changed | default(false)) else [])
           }}
-      when: replace_results is defined
 
     - name: Update apt cache
       apt:
@@ -56,8 +47,9 @@
       retries: 5
       delay: 10
       until: apt_update is success
+      when: list_files.matched | default(0) > 0 or (replace_main.changed | default(false))
 
     - name: Report result
       debug:
         msg: "APT cache updated successfully on {{ inventory_hostname }}"
-      when: apt_update is success
+      when: apt_update is defined and apt_update is success
