@@ -1,0 +1,14 @@
+---
+- name: Shutdown 403 group PCs
+  hosts: "403"
+  become: yes
+  gather_facts: false
+  ignore_unreachable: yes
+
+  tasks:
+    - name: Shutdown the machine
+      ansible.builtin.command: shutdown -h now
+      async: 1
+      poll: 0
+      changed_when: true
+      ignore_errors: true
