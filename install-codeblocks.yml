@@ -1,18 +1,37 @@
 ---
 - name: Install Code::Blocks on 403 group PCs
   hosts: "403"
+  become: yes
   gather_facts: false
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
 
   tasks:
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
+      environment: "{{ proxy_env }}"
+      register: apt_update
+      retries: 5
+      delay: 10
+      until: apt_update is success
 
     - name: Install codeblocks
       ansible.builtin.apt:
         name: codeblocks
         state: present
+      environment: "{{ proxy_env }}"
 
     - name: Check that codeblocks is installed
       ansible.builtin.command: dpkg-query -W -f='${Version}' codeblocks
