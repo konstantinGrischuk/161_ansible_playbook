@@ -1,0 +1,34 @@
+---
+- name: Install PascalABC.NET on 403 group PCs
+  hosts: "403"
+  become: yes
+  gather_facts: false
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+  tasks:
+    - name: Install PascalABC.NET
+      community.general.apt_rpm:
+        pkg: pascalabcnet
+        state: present
+      environment: "{{ proxy_env }}"
+
+    - name: Check that PascalABC.NET is installed
+      ansible.builtin.command: rpm -q pascalabcnet
+      register: pabc_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Show PascalABC.NET version
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} pascalabcnet={{ pabc_ver.stdout if pabc_ver.rc == 0 else 'NOT INSTALLED' }}"
