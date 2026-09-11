@@ -1,0 +1,34 @@
+---
+- name: Install Java 21 OpenJDK on 403 group PCs
+  hosts: "403"
+  become: yes
+  gather_facts: false
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+  tasks:
+    - name: Install Java 21 OpenJDK
+      community.general.apt_rpm:
+        pkg: java-21-openjdk
+        state: present
+      environment: "{{ proxy_env }}"
+
+    - name: Check that Java 21 is installed
+      ansible.builtin.command: rpm -q java-21-openjdk
+      register: java_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Show Java version
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} java-21-openjdk={{ java_ver.stdout if java_ver.rc == 0 else 'NOT INSTALLED' }}"
