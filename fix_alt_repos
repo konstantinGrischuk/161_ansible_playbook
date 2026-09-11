@@ -1,8 +1,5 @@
 ---
-# Разовая нормализация репозиториев ALT Linux: http -> https
-# Запускать для группы all_clients (403 + veyon_clients)
-
-- name: Fix ALT Linux repositories (http -> https)
+- name: Revert ALT Linux repos back to http
   hosts: all_clients
   become: yes
   gather_facts: no
@@ -16,40 +13,25 @@
       register: list_files
       failed_when: false
 
-    - name: Replace http://ftp.altlinux.org with https:// in .list files
+    - name: Replace https://ftp.altlinux.org with http:// in .list files
       replace:
         path: "{{ item.path }}"
-        regexp: 'http://ftp\.altlinux\.org'
-        replace: 'https://ftp.altlinux.org'
+        regexp: 'https://ftp\.altlinux\.org'
+        replace: 'http://ftp.altlinux.org'
       loop: "{{ list_files.files | default([]) }}"
       register: replace_results
 
     - name: Replace in /etc/apt/sources.list (if exists)
       replace:
         path: /etc/apt/sources.list
-        regexp: 'http://ftp\.altlinux\.org'
-        replace: 'https://ftp.altlinux.org'
+        regexp: 'https://ftp\.altlinux\.org'
+        replace: 'http://ftp.altlinux.org'
       failed_when: false
-      register: replace_main
-
-    - name: Show changed files
-      debug:
-        msg: >-
-          Changed: {{
-            (replace_results.results | default([]) | selectattr('changed') | map(attribute='item.path') | list)
-            + (['/etc/apt/sources.list'] if (replace_main.changed | default(false)) else [])
-          }}
 
     - name: Update apt cache
       apt:
         update_cache: yes
       register: apt_update
-      retries: 5
-      delay: 10
+      retries: 3
+      delay: 5
       until: apt_update is success
-      when: list_files.matched | default(0) > 0 or (replace_main.changed | default(false))
-
-    - name: Report result
-      debug:
-        msg: "APT cache updated successfully on {{ inventory_hostname }}"
-      when: apt_update is defined and apt_update is success
