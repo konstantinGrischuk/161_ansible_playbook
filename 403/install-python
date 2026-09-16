@@ -22,7 +22,7 @@
       - python3-tools 
       - python3-module-numpy
       - python3-module-pandas
-      - pycharm-community
+      
 
   tasks:
     - name: Update apt cache
