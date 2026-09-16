@@ -1,0 +1,54 @@
+---
+- name: Install Arduino IDE on 403 group PCs
+  hosts: "403"
+  become: yes
+  gather_facts: true  # Изменено на true, чтобы автоматически узнать имена реальных пользователей на ПК
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+  tasks:
+    - name: Update apt cache
+      community.general.apt_rpm:
+        update_cache: yes
+      environment: "{{ proxy_env }}"
+      register: apt_update
+      retries: 5
+      delay: 10
+      until: apt_update is success
+
+    - name: Install Arduino IDE
+      community.general.apt_rpm:
+        pkg: arduino
+        state: present
+      environment: "{{ proxy_env }}"
+      register: install_result
+
+    # Настройка прав для прошивки плат (добавление бесправного пользователя в нужные группы)
+    - name: Add local user to dialout and uucp groups
+      ansible.builtin.user:
+        name: "{{ ansible_env.USER if ansible_env.USER != 'root' else item }}"
+        groups: dialout,uucp
+        append: yes
+      loop:
+        - "user"  # Укажите здесь имя стандартного пользователя в вашем кабинете, если ansible_env вернет root
+      failed_when: false
+
+    - name: Check that arduino is installed
+      ansible.builtin.command: rpm -q --qf '%{VERSION}' arduino
+      register: arduino_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Show arduino version
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} arduino={{ arduino_ver.stdout if arduino_ver.rc == 0 else 'NOT INSTALLED' }}"
