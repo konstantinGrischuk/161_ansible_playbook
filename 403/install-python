@@ -19,7 +19,7 @@
     # Список необходимых пакетов для Python на ЕГЭ
     python_packages:
       - python3
-      - python3-modules-idle
+      - python3-tools 
       - python3-module-numpy
       - python3-module-pandas
       - pycharm-community
