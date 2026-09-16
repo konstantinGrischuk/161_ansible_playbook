@@ -40,7 +40,7 @@
         groups: dialout,uucp
         append: yes
       loop:
-        - "user"  # Укажите здесь имя стандартного пользователя в вашем кабинете, если ansible_env вернет root
+        - "student"  # Укажите здесь имя стандартного пользователя в вашем кабинете, если ansible_env вернет root
       failed_when: false
 
     - name: Check that arduino is installed
