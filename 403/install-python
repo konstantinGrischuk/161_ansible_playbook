@@ -1,0 +1,52 @@
+---
+- name: Install Python and IDEs for EGE on 403 group PCs
+  hosts: "403"
+  become: yes
+  gather_facts: false
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+    # Список необходимых пакетов для Python на ЕГЭ
+    python_packages:
+      - python3
+      - python3-modules-idle
+      - python3-module-numpy
+      - python3-module-pandas
+      - pycharm-community
+
+  tasks:
+    - name: Update apt cache
+      community.general.apt_rpm:
+        update_cache: yes
+      environment: "{{ proxy_env }}"
+      register: apt_update
+      retries: 5
+      delay: 10
+      until: apt_update is success
+
+    - name: Install Python, IDLE, PyCharm and libraries
+      community.general.apt_rpm:
+        pkg: "{{ item }}"
+        state: present
+      environment: "{{ proxy_env }}"
+      loop: "{{ python_packages }}"
+
+    - name: Check PyCharm installation
+      ansible.builtin.command: rpm -q --qf '%{VERSION}' pycharm-community
+      register: pycharm_ver
+      changed_when: false
+      failed_when: false
+
+    - name: Show PyCharm version
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} PyCharm={{ pycharm_ver.stdout if pycharm_ver.rc == 0 else 'NOT INSTALLED' }}"
