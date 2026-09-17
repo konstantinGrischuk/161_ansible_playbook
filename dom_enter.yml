@@ -5,7 +5,7 @@
 # ================================================================
 
 - name: Setup IPA client
-  hosts: all_clients
+  hosts: 403
   gather_facts: true
   become: true
   become_method: su
