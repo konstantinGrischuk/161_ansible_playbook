@@ -5,7 +5,7 @@
 # ================================================================
 
 - name: Setup IPA client
-  hosts: 317
+  hosts: "317"
   gather_facts: true
   become: true
   become_method: su
