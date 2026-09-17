@@ -1,950 +1,400 @@
-
-#!/bin/bash
-# ================================================================
-# Скрипт для ПОЛНОЙ автоматической настройки IPA-клиента
-# Версия: 7.0 (Финальная, с исправлением всех проблем)
-# Дата: 2026-09-04
-# ================================================================
-
-set -e
-
-# ЦВЕТА ДЛЯ ВЫВОДА
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-print_sep() { echo "================================================================"; }
-
-# ================================================================
-# КОНФИГУРАЦИЯ
-# ================================================================
-
-IPA_DOMAIN="licey.loc"
-IPA_SERVER="ipa.${IPA_DOMAIN}"
-IPA_REALM="LICEY.LOC"
-IPA_PASSWORD="${IPA_PASSWORD:-}"  # Измените на ваш пароль
-
-# Пути
-STUDENTS_HOME="/mnt/home/students"
-TEACHERS_HOME="/mnt/home/teachers"
-
-# ================================================================
-# ПРОВЕРКА: Запуск от root
-# ================================================================
-
-if [ "$EUID" -ne 0 ]; then
-    log_error "Скрипт должен запускаться от root (sudo)"
-    exit 1
-fi
-
-print_sep
-log_info "Начало автоматической настройки IPA-клиента"
-log_info "Версия скрипта: 7.0"
-print_sep
-
-# ================================================================
-# 1. ОПРЕДЕЛЕНИЕ ИМЕНИ ХОСТА
-# ================================================================
-
-log_info "Определение имени хоста..."
-
-if [ -f /etc/hostname ]; then
-    SHORT_HOSTNAME=$(cat /etc/hostname | tr -d ' \n')
-else
-    SHORT_HOSTNAME=$(hostname -s)
-fi
-
-SHORT_HOSTNAME=$(echo "$SHORT_HOSTNAME" | cut -d. -f1)
-
-if [[ ! "$SHORT_HOSTNAME" =~ ^pc[0-9]{3}-[0-9]+$ ]]; then
-    log_warn "Имя хоста '$SHORT_HOSTNAME' не соответствует формату pcXXX-YY"
-    log_info "Используем текущее имя: $SHORT_HOSTNAME"
-fi
-
-FULL_HOSTNAME="${SHORT_HOSTNAME}.${IPA_DOMAIN}"
-
-log_ok "Короткое имя: $SHORT_HOSTNAME"
-log_ok "Полное имя:  $FULL_HOSTNAME"
-
-# Устанавливаем правильное имя хоста
-if [ "$(hostname -f)" != "$FULL_HOSTNAME" ]; then
-    log_info "Устанавливаем правильное имя хоста..."
-    hostnamectl set-hostname "$FULL_HOSTNAME"
-    echo "$SHORT_HOSTNAME" > /etc/hostname
-    
-    if ! grep -q "$FULL_HOSTNAME" /etc/hosts; then
-        IP_ADDR=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
-        if [ -n "$IP_ADDR" ]; then
-            echo "$IP_ADDR $FULL_HOSTNAME $SHORT_HOSTNAME" >> /etc/hosts
-            log_ok "Добавлена запись в /etc/hosts"
-        fi
-    fi
-    log_ok "Имя хоста установлено"
-fi
-
-# ================================================================
-# 2. ПРОВЕРКА ДОСТУПНОСТИ IPA
-# ================================================================
-
-log_info "Проверка доступности IPA-сервера..."
-if ! ping -c 1 -W 2 "$IPA_SERVER" > /dev/null 2>&1; then
-    log_error "IPA-сервер $IPA_SERVER недоступен"
-    log_info "Проверьте сеть или имя сервера"
-    exit 1
-fi
-log_ok "IPA-сервер доступен"
-
-# ================================================================
-# 3. ОСТАНОВКА И ОТКЛЮЧЕНИЕ СЛУЖБ
-# ================================================================
-
-log_info "Остановка служб..."
-systemctl stop sssd 2>/dev/null || true
-systemctl stop autofs 2>/dev/null || true
-systemctl stop nscd 2>/dev/null || true
-systemctl disable nscd 2>/dev/null || true
-log_ok "Службы остановлены"
-
-# ================================================================
-# 4. УДАЛЕНИЕ СТАРОЙ КОНФИГУРАЦИИ
-# ================================================================
-
-log_info "Удаление старой конфигурации..."
-
-# Удаляем через ipa-client-install
-if [ -f /sbin/ipa-client-install ]; then
-    log_info "Запуск ipa-client-install --uninstall..."
-    /sbin/ipa-client-install --uninstall -U 2>/dev/null || true
-fi
-
-# Удаляем все файлы
-rm -rf /etc/ipa
-rm -rf /etc/sssd
-rm -rf /var/lib/sss
-rm -rf /var/log/sssd
-rm -rf /var/run/sssd
-rm -f /etc/krb5.keytab
-rm -f /etc/krb5.conf
-rm -f /etc/krb5.conf.d/* 2>/dev/null || true
-
-log_ok "Старая конфигурация удалена"
-
-# ================================================================
-# 5. СОЗДАНИЕ КАТАЛОГОВ
-# ================================================================
-
-log_info "Создание структуры каталогов..."
-
-mkdir -p /etc/ipa
-mkdir -p /etc/sssd/conf.d
-mkdir -p /var/lib/ipa-client/pki
-mkdir -p /var/lib/sss/{db,mc,pipes/private}
-mkdir -p /var/log/sssd
-mkdir -p /var/run/sssd
-mkdir -p "$STUDENTS_HOME" "$TEACHERS_HOME"
-
-log_ok "Каталоги созданы"
-
-# ================================================================
-# 6. НАСТРОЙКА KERBEROS (КЛЮЧЕВОЙ МОМЕНТ - ИСПРАВЛЯЕМ includedir)
-# ================================================================
-
-log_info "Настройка Kerberos..."
-
-# Создаем каталог krb5.conf.d
-mkdir -p /etc/krb5.conf.d
-chmod 755 /etc/krb5.conf.d
-
-# Создаем файл, который не вызовет ошибку
-cat > /etc/krb5.conf.d/00-default.conf << 'EOF'
-# Этот файл необходим для корректной работы Kerberos
-# Он пустой, чтобы не влиять на настройки
-EOF
-chmod 644 /etc/krb5.conf.d/00-default.conf
-
-# Создаем основной конфиг БЕЗ includedir
-cat > /etc/krb5.conf << 'EOF'
-[libdefaults]
-    default_realm = LICEY.LOC
-    dns_lookup_realm = false
-    dns_lookup_kdc = true
-    ticket_lifetime = 24h
-    forwardable = true
-    dns_canonicalize_hostname = false
-    rdns = false
-    default_ccache_name = KEYRING:persistent:%{uid}
-
-[realms]
-    LICEY.LOC = {
-        kdc = ipa.licey.loc
-        admin_server = ipa.licey.loc
-        kpasswd_server = ipa.licey.loc
-        default_domain = licey.loc
-    }
-
-[domain_realm]
-    .licey.loc = LICEY.LOC
-    licey.loc = LICEY.LOC
-EOF
-
-chmod 644 /etc/krb5.conf
-
-log_ok "Kerberos настроен"
-
-# ================================================================
-# 7. ПРОВЕРКА KERBEROS
-# ================================================================
-
-log_info "Проверка Kerberos..."
-
-# Пробуем получить билет
-if echo "$IPA_PASSWORD" | kinit admin@"$IPA_REALM" 2>/dev/null; then
-    log_ok "Kerberos работает"
-    klist
-    kdestroy 2>/dev/null || true
-else
-    log_error "Kerberos не работает. Проверьте пароль администратора."
-    log_info "Пароль в скрипте: $IPA_PASSWORD"
-    exit 1
-fi
-
-# ================================================================
-# 8. РЕГИСТРАЦИЯ В IPA
-# ================================================================
-
-log_info "Регистрация машины в FreeIPA..."
-
-if /sbin/ipa-client-install \
-    --domain="$IPA_DOMAIN" \
-    --server="$IPA_SERVER" \
-    --principal=admin \
-    -w "$IPA_PASSWORD" \
-    --no-ntp \
-    --mkhomedir \
-    --unattended \
-    --force-join 2>&1; then
-    
-    log_ok "Машина успешно зарегистрирована в IPA"
-else
-    log_error "Ошибка регистрации в IPA"
-    log_info "Смотрите лог: /var/log/ipaclient-install.log"
-    exit 1
-fi
-
-# ================================================================
-# 9. НАСТРОЙКА SSSD
-# ================================================================
-
-log_info "Настройка SSSD..."
-
-# Останавливаем SSSD
-systemctl stop sssd 2>/dev/null || true
-
-# Создаем конфигурацию SSSD
-cat > /etc/sssd/sssd.conf << EOF
-[domain/$IPA_DOMAIN]
-id_provider = ipa
-ipa_server = _srv_, $IPA_SERVER
-ipa_domain = $IPA_DOMAIN
-ipa_hostname = $FULL_HOSTNAME
-auth_provider = ipa
-chpass_provider = ipa
-access_provider = ipa
-cache_credentials = True
-ldap_tls_cacert = /etc/ipa/ca.crt
-krb5_store_password_if_offline = True
-autofs_provider = ipa
-ipa_automount_location = default
-default_shell = /bin/bash
-
-homedir_substring = /mnt/home/students
-fallback_homedir = /mnt/home/teachers/%u
-
-[sssd]
-config_file_version = 2
-services = nss, pam, ssh, sudo, autofs
-domains = $IPA_DOMAIN
-
-[nss]
-[pam]
-[ssh]
-[sudo]
-EOF
-
-chmod 600 /etc/sssd/sssd.conf
-log_ok "SSSD настроен"
-
-# ================================================================
-# 10. НАСТРОЙКА AUTOFS
-# ================================================================
-
-log_info "Настройка autofs..."
-
-if [ -f /sbin/ipa-client-automount ]; then
-    /sbin/ipa-client-automount --unattended 2>/dev/null || true
-fi
-
-AUTOFS_OVERRIDE_DIR="/etc/systemd/system/autofs.service.d"
-mkdir -p "$AUTOFS_OVERRIDE_DIR"
-cat > "$AUTOFS_OVERRIDE_DIR/override.conf" << EOF
-[Unit]
-Requires=sssd.service
-After=sssd.service
-EOF
-
-systemctl daemon-reload
-log_ok "Autofs настроен"
-
-# ================================================================
-# 11. УСТАНОВКА ПРАВ
-# ================================================================
-
-log_info "Установка прав доступа..."
-
-# Определяем пользователя SSSD
-SSSD_USER=$(getent passwd | grep -E "^(sssd|_sssd):" | cut -d: -f1)
-if [ -z "$SSSD_USER" ]; then
-    SSSD_USER="_sssd"
-fi
-
-chown root:root /etc/sssd
-chmod 711 /etc/sssd
-chown root:root /etc/sssd/sssd.conf
-chmod 600 /etc/sssd/sssd.conf
-
-if id "$SSSD_USER" &>/dev/null; then
-    chown -R "$SSSD_USER":"$SSSD_USER" /var/lib/sss 2>/dev/null || true
-    chown -R "$SSSD_USER":"$SSSD_USER" /var/log/sssd 2>/dev/null || true
-fi
-
-chmod 755 /var/lib/sss
-chmod 700 /var/lib/sss/db
-chmod 755 /var/lib/sss/mc
-chmod 755 /var/lib/sss/pipes
-chmod 755 /var/lib/sss/pipes/private
-chmod 755 /var/run/sssd
-
-log_ok "Права установлены"
-
-# ================================================================
-# 12. ЗАПУСК СЛУЖБ
-# ================================================================
-
-log_info "Запуск служб..."
-
-systemctl start sssd
-sleep 3
-systemctl start autofs
-sleep 1
-
-if systemctl is-active --quiet sssd && systemctl is-active --quiet autofs; then
-    log_ok "SSSD и autofs успешно запущены"
-else
-    log_error "Ошибка запуска служб"
-    systemctl status sssd --no-pager || true
-    systemctl status autofs --no-pager || true
-    exit 1
-fi
-
-systemctl enable sssd 2>/dev/null || true
-systemctl enable autofs 2>/dev/null || true
-
-# ================================================================
-# 13. ПРОВЕРКА РАБОТЫ
-# ================================================================
-
-log_info "Проверка работы..."
-
-sss_cache -E 2>/dev/null || true
-sleep 2
-
-# Проверяем keytab
-if klist -kt /etc/krb5.keytab 2>/dev/null | grep -q "host/${FULL_HOSTNAME}"; then
-    log_ok "Keytab содержит правильный хост"
-else
-    log_error "Keytab содержит неправильный хост!"
-    klist -kt /etc/krb5.keytab 2>/dev/null | grep host || echo "  (пусто)"
-fi
-
-# Проверяем пользователя student
-if id student >/dev/null 2>&1; then
-    log_ok "Пользователь student найден!"
-    STUDENT_HOME=$(getent passwd student | cut -d: -f6)
-    log_info "Домашняя папка: $STUDENT_HOME"
-else
-    log_warn "Пользователь student не найден, возможно кэш еще не обновился"
-    log_info "Попробуйте через 10-20 секунд"
-fi
-
-# Проверяем su
-if su student -c "whoami" > /dev/null 2>&1; then
-    log_ok "su student работает!"
-else
-    log_warn "su student не работает, возможно нужно сбросить пароль"
-    log_info "На сервере IPA выполните: ipa user-mod student --password"
-fi
-
-# ================================================================
-# 14. НАСТРОЙКА ZABBIX (опционально)
-# ================================================================
-
-if [ -f /etc/zabbix/zabbix_agentd.conf ]; then
-    log_info "Настройка Zabbix агента..."
-    
-    sed -i 's/^Server=.*/Server=10.205.112.6/' /etc/zabbix/zabbix_agentd.conf
-    sed -i 's/^ServerActive=.*/ServerActive=10.205.112.6/' /etc/zabbix/zabbix_agentd.conf
-    sed -i "s/^Hostname=.*/Hostname=${SHORT_HOSTNAME}/" /etc/zabbix/zabbix_agentd.conf
-    
-    if systemctl list-unit-files | grep -q "zabbix_agentd.service"; then
-        systemctl enable zabbix_agentd 2>/dev/null || true
-        systemctl restart zabbix_agentd 2>/dev/null || true
-        log_ok "Zabbix Agent перезапущен"
-    elif systemctl list-unit-files | grep -q "zabbix-agent2.service"; then
-        systemctl enable zabbix-agent2 2>/dev/null || true
-        systemctl restart zabbix-agent2 2>/dev/null || true
-        log_ok "Zabbix Agent 2 перезапущен"
-    else
-        log_warn "Zabbix агент не найден"
-    fi
-fi
-
-# ================================================================
-# 15. ПЕРЕЗАПУСК ДИСПЛЕЙНОГО МЕНЕДЖЕРА
-# ================================================================
-
-log_info "Перезапуск дисплейного менеджера..."
-systemctl restart dm 2>/dev/null || true
-
-# ================================================================
-# 16. ИТОГИ
-# ================================================================
-
-print_sep
-log_ok "=== НАСТРОЙКА УСПЕШНО ЗАВЕРШЕНА! ==="
-print_sep
-log_info "Имя хоста: $FULL_HOSTNAME"
-log_info "Домен: $IPA_DOMAIN"
-log_info "Сервер IPA: $IPA_SERVER"
-log_info "Статус SSSD: $(systemctl is-active sssd)"
-log_info "Статус autofs: $(systemctl is-active autofs)"
-print_sep
-log_info "Проверка keytab:"
-klist -kt /etc/krb5.keytab 2>/dev/null | grep host || echo "  (ошибка)"
-print_sep
-log_ok "Машина готова к работе!"
-print_sep
-
-# ================================================================
-# 17. ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ admin (ДОМЕН) В ГРУППУ wheels
-# ================================================================
-
-log_info "Добавление доменного пользователя admin в группу wheels..."
-
-# Проверяем, существует ли доменный пользователь admin
-if id admin >/dev/null 2>&1; then
-    # Проверяем, существует ли группа wheels
-    if getent group wheels >/dev/null 2>&1; then
-        # Добавляем пользователя в группу
-        if usermod -aG wheels admin 2>/dev/null; then
-            log_ok "Пользователь admin добавлен в группу wheels"
-        else
-            log_warn "Не удалось добавить admin в wheels через usermod, пробуем gpasswd..."
-            if gpasswd -a admin wheels 2>/dev/null; then
-                log_ok "Пользователь admin добавлен в группу wheels (gpasswd)"
-            else
-                log_error "Не удалось добавить admin в группу wheels"
-            fi
-        fi
-        # Показываем итоговые группы
-        log_info "Группы пользователя admin: $(id -nG admin 2>/dev/null || echo 'н/д')"
-    else
-        log_warn "Группа wheels не найдена в системе — пропускаем"
-    fi
-else
-    log_warn "Доменный пользователь admin не найден (возможно, SSSD ещё не прогрелся)"
-    log_info "Повторите позже: sudo usermod -aG wheels admin"
-fi
-
-print_sep
-log_ok "Скрипт завершён."
-print_sep#!/bin/bash
-# ================================================================
-# Скрипт для ПОЛНОЙ автоматической настройки IPA-клиента
-# Версия: 7.0 (Финальная, с исправлением всех проблем)
-# Дата: 2026-09-04
-# ================================================================
-
-set -e
-
-# ЦВЕТА ДЛЯ ВЫВОДА
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-print_sep() { echo "================================================================"; }
-
-# ================================================================
-# КОНФИГУРАЦИЯ
-# ================================================================
-
-IPA_DOMAIN="licey.loc"
-IPA_SERVER="ipa.${IPA_DOMAIN}"
-IPA_REALM="LICEY.LOC"
-IPA_PASSWORD=",tkrj,hfpbt18"  # Измените на ваш пароль
-
-# Пути
-STUDENTS_HOME="/mnt/home/students"
-TEACHERS_HOME="/mnt/home/teachers"
-
-# ================================================================
-# ПРОВЕРКА: Запуск от root
-# ================================================================
-
-if [ "$EUID" -ne 0 ]; then
-    log_error "Скрипт должен запускаться от root (sudo)"
-    exit 1
-fi
-
-print_sep
-log_info "Начало автоматической настройки IPA-клиента"
-log_info "Версия скрипта: 7.0"
-print_sep
-
-# ================================================================
-# 1. ОПРЕДЕЛЕНИЕ ИМЕНИ ХОСТА
-# ================================================================
-
-log_info "Определение имени хоста..."
-
-if [ -f /etc/hostname ]; then
-    SHORT_HOSTNAME=$(cat /etc/hostname | tr -d ' \n')
-else
-    SHORT_HOSTNAME=$(hostname -s)
-fi
-
-SHORT_HOSTNAME=$(echo "$SHORT_HOSTNAME" | cut -d. -f1)
-
-if [[ ! "$SHORT_HOSTNAME" =~ ^pc[0-9]{3}-[0-9]+$ ]]; then
-    log_warn "Имя хоста '$SHORT_HOSTNAME' не соответствует формату pcXXX-YY"
-    log_info "Используем текущее имя: $SHORT_HOSTNAME"
-fi
-
-FULL_HOSTNAME="${SHORT_HOSTNAME}.${IPA_DOMAIN}"
-
-log_ok "Короткое имя: $SHORT_HOSTNAME"
-log_ok "Полное имя:  $FULL_HOSTNAME"
-
-# Устанавливаем правильное имя хоста
-if [ "$(hostname -f)" != "$FULL_HOSTNAME" ]; then
-    log_info "Устанавливаем правильное имя хоста..."
-    hostnamectl set-hostname "$FULL_HOSTNAME"
-    echo "$SHORT_HOSTNAME" > /etc/hostname
-    
-    if ! grep -q "$FULL_HOSTNAME" /etc/hosts; then
-        IP_ADDR=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
-        if [ -n "$IP_ADDR" ]; then
-            echo "$IP_ADDR $FULL_HOSTNAME $SHORT_HOSTNAME" >> /etc/hosts
-            log_ok "Добавлена запись в /etc/hosts"
-        fi
-    fi
-    log_ok "Имя хоста установлено"
-fi
-
-# ================================================================
-# 2. ПРОВЕРКА ДОСТУПНОСТИ IPA
-# ================================================================
-
-log_info "Проверка доступности IPA-сервера..."
-if ! ping -c 1 -W 2 "$IPA_SERVER" > /dev/null 2>&1; then
-    log_error "IPA-сервер $IPA_SERVER недоступен"
-    log_info "Проверьте сеть или имя сервера"
-    exit 1
-fi
-log_ok "IPA-сервер доступен"
-
-# ================================================================
-# 3. ОСТАНОВКА И ОТКЛЮЧЕНИЕ СЛУЖБ
-# ================================================================
-
-log_info "Остановка служб..."
-systemctl stop sssd 2>/dev/null || true
-systemctl stop autofs 2>/dev/null || true
-systemctl stop nscd 2>/dev/null || true
-systemctl disable nscd 2>/dev/null || true
-log_ok "Службы остановлены"
-
-# ================================================================
-# 4. УДАЛЕНИЕ СТАРОЙ КОНФИГУРАЦИИ
-# ================================================================
-
-log_info "Удаление старой конфигурации..."
-
-# Удаляем через ipa-client-install
-if [ -f /sbin/ipa-client-install ]; then
-    log_info "Запуск ipa-client-install --uninstall..."
-    /sbin/ipa-client-install --uninstall -U 2>/dev/null || true
-fi
-
-# Удаляем все файлы
-rm -rf /etc/ipa
-rm -rf /etc/sssd
-rm -rf /var/lib/sss
-rm -rf /var/log/sssd
-rm -rf /var/run/sssd
-rm -f /etc/krb5.keytab
-rm -f /etc/krb5.conf
-rm -f /etc/krb5.conf.d/* 2>/dev/null || true
-
-log_ok "Старая конфигурация удалена"
-
-# ================================================================
-# 5. СОЗДАНИЕ КАТАЛОГОВ
-# ================================================================
-
-log_info "Создание структуры каталогов..."
-
-mkdir -p /etc/ipa
-mkdir -p /etc/sssd/conf.d
-mkdir -p /var/lib/ipa-client/pki
-mkdir -p /var/lib/sss/{db,mc,pipes/private}
-mkdir -p /var/log/sssd
-mkdir -p /var/run/sssd
-mkdir -p "$STUDENTS_HOME" "$TEACHERS_HOME"
-
-log_ok "Каталоги созданы"
-
-# ================================================================
-# 6. НАСТРОЙКА KERBEROS (КЛЮЧЕВОЙ МОМЕНТ - ИСПРАВЛЯЕМ includedir)
-# ================================================================
-
-log_info "Настройка Kerberos..."
-
-# Создаем каталог krb5.conf.d
-mkdir -p /etc/krb5.conf.d
-chmod 755 /etc/krb5.conf.d
-
-# Создаем файл, который не вызовет ошибку
-cat > /etc/krb5.conf.d/00-default.conf << 'EOF'
-# Этот файл необходим для корректной работы Kerberos
-# Он пустой, чтобы не влиять на настройки
-EOF
-chmod 644 /etc/krb5.conf.d/00-default.conf
-
-# Создаем основной конфиг БЕЗ includedir
-cat > /etc/krb5.conf << 'EOF'
-[libdefaults]
-    default_realm = LICEY.LOC
-    dns_lookup_realm = false
-    dns_lookup_kdc = true
-    ticket_lifetime = 24h
-    forwardable = true
-    dns_canonicalize_hostname = false
-    rdns = false
-    default_ccache_name = KEYRING:persistent:%{uid}
-
-[realms]
-    LICEY.LOC = {
-        kdc = ipa.licey.loc
-        admin_server = ipa.licey.loc
-        kpasswd_server = ipa.licey.loc
-        default_domain = licey.loc
-    }
-
-[domain_realm]
-    .licey.loc = LICEY.LOC
-    licey.loc = LICEY.LOC
-EOF
-
-chmod 644 /etc/krb5.conf
-
-log_ok "Kerberos настроен"
-
-# ================================================================
-# 7. ПРОВЕРКА KERBEROS
-# ================================================================
-
-log_info "Проверка Kerberos..."
-
-# Пробуем получить билет
-if echo "$IPA_PASSWORD" | kinit admin@"$IPA_REALM" 2>/dev/null; then
-    log_ok "Kerberos работает"
-    klist
-    kdestroy 2>/dev/null || true
-else
-    log_error "Kerberos не работает. Проверьте пароль администратора."
-    log_info "Пароль в скрипте: $IPA_PASSWORD"
-    exit 1
-fi
-
-# ================================================================
-# 8. РЕГИСТРАЦИЯ В IPA
-# ================================================================
-
-log_info "Регистрация машины в FreeIPA..."
-
-if /sbin/ipa-client-install \
-    --domain="$IPA_DOMAIN" \
-    --server="$IPA_SERVER" \
-    --principal=admin \
-    -w "$IPA_PASSWORD" \
-    --no-ntp \
-    --mkhomedir \
-    --unattended \
-    --force-join 2>&1; then
-    
-    log_ok "Машина успешно зарегистрирована в IPA"
-else
-    log_error "Ошибка регистрации в IPA"
-    log_info "Смотрите лог: /var/log/ipaclient-install.log"
-    exit 1
-fi
-
-# ================================================================
-# 9. НАСТРОЙКА SSSD
-# ================================================================
-
-log_info "Настройка SSSD..."
-
-# Останавливаем SSSD
-systemctl stop sssd 2>/dev/null || true
-
-# Создаем конфигурацию SSSD
-cat > /etc/sssd/sssd.conf << EOF
-[domain/$IPA_DOMAIN]
-id_provider = ipa
-ipa_server = _srv_, $IPA_SERVER
-ipa_domain = $IPA_DOMAIN
-ipa_hostname = $FULL_HOSTNAME
-auth_provider = ipa
-chpass_provider = ipa
-access_provider = ipa
-cache_credentials = True
-ldap_tls_cacert = /etc/ipa/ca.crt
-krb5_store_password_if_offline = True
-autofs_provider = ipa
-ipa_automount_location = default
-default_shell = /bin/bash
-
-homedir_substring = /mnt/home/students
-fallback_homedir = /mnt/home/teachers/%u
-
-[sssd]
-config_file_version = 2
-services = nss, pam, ssh, sudo, autofs
-domains = $IPA_DOMAIN
-
-[nss]
-[pam]
-[ssh]
-[sudo]
-EOF
-
-chmod 600 /etc/sssd/sssd.conf
-log_ok "SSSD настроен"
-
-# ================================================================
-# 10. НАСТРОЙКА AUTOFS
-# ================================================================
-
-log_info "Настройка autofs..."
-
-if [ -f /sbin/ipa-client-automount ]; then
-    /sbin/ipa-client-automount --unattended 2>/dev/null || true
-fi
-
-AUTOFS_OVERRIDE_DIR="/etc/systemd/system/autofs.service.d"
-mkdir -p "$AUTOFS_OVERRIDE_DIR"
-cat > "$AUTOFS_OVERRIDE_DIR/override.conf" << EOF
-[Unit]
-Requires=sssd.service
-After=sssd.service
-EOF
-
-systemctl daemon-reload
-log_ok "Autofs настроен"
-
-# ================================================================
-# 11. УСТАНОВКА ПРАВ
-# ================================================================
-
-log_info "Установка прав доступа..."
-
-# Определяем пользователя SSSD
-SSSD_USER=$(getent passwd | grep -E "^(sssd|_sssd):" | cut -d: -f1)
-if [ -z "$SSSD_USER" ]; then
-    SSSD_USER="_sssd"
-fi
-
-chown root:root /etc/sssd
-chmod 711 /etc/sssd
-chown root:root /etc/sssd/sssd.conf
-chmod 600 /etc/sssd/sssd.conf
-
-if id "$SSSD_USER" &>/dev/null; then
-    chown -R "$SSSD_USER":"$SSSD_USER" /var/lib/sss 2>/dev/null || true
-    chown -R "$SSSD_USER":"$SSSD_USER" /var/log/sssd 2>/dev/null || true
-fi
-
-chmod 755 /var/lib/sss
-chmod 700 /var/lib/sss/db
-chmod 755 /var/lib/sss/mc
-chmod 755 /var/lib/sss/pipes
-chmod 755 /var/lib/sss/pipes/private
-chmod 755 /var/run/sssd
-
-log_ok "Права установлены"
-
-# ================================================================
-# 12. ЗАПУСК СЛУЖБ
-# ================================================================
-
-log_info "Запуск служб..."
-
-systemctl start sssd
-sleep 3
-systemctl start autofs
-sleep 1
-
-if systemctl is-active --quiet sssd && systemctl is-active --quiet autofs; then
-    log_ok "SSSD и autofs успешно запущены"
-else
-    log_error "Ошибка запуска служб"
-    systemctl status sssd --no-pager || true
-    systemctl status autofs --no-pager || true
-    exit 1
-fi
-
-systemctl enable sssd 2>/dev/null || true
-systemctl enable autofs 2>/dev/null || true
-
-# ================================================================
-# 13. ПРОВЕРКА РАБОТЫ
-# ================================================================
-
-log_info "Проверка работы..."
-
-sss_cache -E 2>/dev/null || true
-sleep 2
-
-# Проверяем keytab
-if klist -kt /etc/krb5.keytab 2>/dev/null | grep -q "host/${FULL_HOSTNAME}"; then
-    log_ok "Keytab содержит правильный хост"
-else
-    log_error "Keytab содержит неправильный хост!"
-    klist -kt /etc/krb5.keytab 2>/dev/null | grep host || echo "  (пусто)"
-fi
-
-# Проверяем пользователя student
-if id student >/dev/null 2>&1; then
-    log_ok "Пользователь student найден!"
-    STUDENT_HOME=$(getent passwd student | cut -d: -f6)
-    log_info "Домашняя папка: $STUDENT_HOME"
-else
-    log_warn "Пользователь student не найден, возможно кэш еще не обновился"
-    log_info "Попробуйте через 10-20 секунд"
-fi
-
-# Проверяем su
-if su student -c "whoami" > /dev/null 2>&1; then
-    log_ok "su student работает!"
-else
-    log_warn "su student не работает, возможно нужно сбросить пароль"
-    log_info "На сервере IPA выполните: ipa user-mod student --password"
-fi
-
-# ================================================================
-# 14. НАСТРОЙКА ZABBIX (опционально)
-# ================================================================
-
-if [ -f /etc/zabbix/zabbix_agentd.conf ]; then
-    log_info "Настройка Zabbix агента..."
-    
-    sed -i 's/^Server=.*/Server=10.205.112.6/' /etc/zabbix/zabbix_agentd.conf
-    sed -i 's/^ServerActive=.*/ServerActive=10.205.112.6/' /etc/zabbix/zabbix_agentd.conf
-    sed -i "s/^Hostname=.*/Hostname=${SHORT_HOSTNAME}/" /etc/zabbix/zabbix_agentd.conf
-    
-    if systemctl list-unit-files | grep -q "zabbix_agentd.service"; then
-        systemctl enable zabbix_agentd 2>/dev/null || true
-        systemctl restart zabbix_agentd 2>/dev/null || true
-        log_ok "Zabbix Agent перезапущен"
-    elif systemctl list-unit-files | grep -q "zabbix-agent2.service"; then
-        systemctl enable zabbix-agent2 2>/dev/null || true
-        systemctl restart zabbix-agent2 2>/dev/null || true
-        log_ok "Zabbix Agent 2 перезапущен"
-    else
-        log_warn "Zabbix агент не найден"
-    fi
-fi
-
-# ================================================================
-# 15. ПЕРЕЗАПУСК ДИСПЛЕЙНОГО МЕНЕДЖЕРА
-# ================================================================
-
-log_info "Перезапуск дисплейного менеджера..."
-systemctl restart dm 2>/dev/null || true
-
-# ================================================================
-# 16. ИТОГИ
-# ================================================================
-
-print_sep
-log_ok "=== НАСТРОЙКА УСПЕШНО ЗАВЕРШЕНА! ==="
-print_sep
-log_info "Имя хоста: $FULL_HOSTNAME"
-log_info "Домен: $IPA_DOMAIN"
-log_info "Сервер IPA: $IPA_SERVER"
-log_info "Статус SSSD: $(systemctl is-active sssd)"
-log_info "Статус autofs: $(systemctl is-active autofs)"
-print_sep
-log_info "Проверка keytab:"
-klist -kt /etc/krb5.keytab 2>/dev/null | grep host || echo "  (ошибка)"
-print_sep
-log_ok "Машина готова к работе!"
-print_sep
-
-# ================================================================
-# 17. ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ admin (ДОМЕН) В ГРУППУ wheels
-# ================================================================
-
-log_info "Добавление доменного пользователя admin в группу wheels..."
-
-# Проверяем, существует ли доменный пользователь admin
-if id admin >/dev/null 2>&1; then
-    # Проверяем, существует ли группа wheels
-    if getent group wheels >/dev/null 2>&1; then
-        # Добавляем пользователя в группу
-        if usermod -aG wheels admin 2>/dev/null; then
-            log_ok "Пользователь admin добавлен в группу wheels"
-        else
-            log_warn "Не удалось добавить admin в wheels через usermod, пробуем gpasswd..."
-            if gpasswd -a admin wheels 2>/dev/null; then
-                log_ok "Пользователь admin добавлен в группу wheels (gpasswd)"
-            else
-                log_error "Не удалось добавить admin в группу wheels"
-            fi
-        fi
-        # Показываем итоговые группы
-        log_info "Группы пользователя admin: $(id -nG admin 2>/dev/null || echo 'н/д')"
-    else
-        log_warn "Группа wheels не найдена в системе — пропускаем"
-    fi
-else
-    log_warn "Доменный пользователь admin не найден (возможно, SSSD ещё не прогрелся)"
-    log_info "Повторите позже: sudo usermod -aG wheels admin"
-fi
-
-print_sep
-log_ok "Скрипт завершён."
-print_sep
+---
+# ================================================================
+# Playbook: полная настройка IPA-клиента
+# Аналог bash-скрипта fix_sssd.sh v7.0
+# ================================================================
+
+- name: Setup IPA client
+  hosts: all_clients
+  gather_facts: true
+  become: true
+  become_method: su
+  become_user: root
+
+  vars:
+    ipa_domain: "licey.loc"
+    ipa_server: "ipa.{{ ipa_domain }}"
+    ipa_realm: "LICEY.LOC"
+    # Пароль берём из Variable Group (Secret), не хардкодим
+    ipa_password: "{{ lookup('env', 'IPA_PASSWORD') | default('', true) }}"
+
+    students_home: "/mnt/home/students"
+    teachers_home: "/mnt/home/teachers"
+
+    zabbix_server: "10.205.112.6"
+
+  tasks:
+
+    # ---------- 0. Проверки ----------
+    - name: Проверить, что IPA_PASSWORD задан
+      ansible.builtin.assert:
+        that:
+          - ipa_password | length > 0
+        fail_msg: "Переменная IPA_PASSWORD не задана"
+        success_msg: "IPA_PASSWORD задан"
+
+    - name: Проверить доступность IPA-сервера
+      ansible.builtin.command: "ping -c 1 -W 2 {{ ipa_server }}"
+      register: ping_result
+      changed_when: false
+      failed_when: ping_result.rc != 0
+
+    # ---------- 1. Hostname ----------
+    - name: Получить короткое имя хоста
+      ansible.builtin.set_fact:
+        short_hostname: "{{ ansible_hostname | default(inventory_hostname) | split('.') | first }}"
+
+    - name: Предупредить, если hostname не по шаблону
+      ansible.builtin.debug:
+        msg: "ВНИМАНИЕ: имя '{{ short_hostname }}' не соответствует pcXXX-YY"
+      when: not (short_hostname is match('^pc[0-9]{3}-[0-9]+$'))
+
+    - name: Установить полное имя хоста
+      ansible.builtin.set_fact:
+        full_hostname: "{{ short_hostname }}.{{ ipa_domain }}"
+
+    - name: Установить hostname через hostnamectl
+      ansible.builtin.hostname:
+        name: "{{ full_hostname }}"
+        use: systemd
+      when: ansible_fqdn != full_hostname
+
+    - name: Прописать короткое имя в /etc/hostname
+      ansible.builtin.copy:
+        content: "{{ short_hostname }}\n"
+        dest: /etc/hostname
+        owner: root
+        group: root
+        mode: "0644"
+      when: ansible_fqdn != full_hostname
+
+    - name: Добавить запись в /etc/hosts (если нет)
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "{{ ansible_default_ipv4.address }} {{ full_hostname }} {{ short_hostname }}"
+        state: present
+        create: true
+      when:
+        - ansible_fqdn != full_hostname
+        - ansible_default_ipv4 is defined
+
+    # ---------- 2. Остановка служб ----------
+    - name: Остановить sssd, autofs, nscd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop:
+        - sssd
+        - autofs
+        - nscd
+      failed_when: false
+
+    # ---------- 3. Удаление старой конфигурации ----------
+    - name: Запустить ipa-client-install --uninstall
+      ansible.builtin.command: /sbin/ipa-client-install --uninstall -U
+      register: uninstall_result
+      failed_when: false
+      changed_when: uninstall_result.rc == 0
+
+    - name: Удалить старые файлы конфигурации
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/ipa
+        - /etc/sssd
+        - /var/lib/sss
+        - /var/log/sssd
+        - /var/run/sssd
+        - /etc/krb5.keytab
+        - /etc/krb5.conf
+
+    - name: Удалить файлы в /etc/krb5.conf.d
+      ansible.builtin.shell: "rm -f /etc/krb5.conf.d/* || true"
+      changed_when: false
+
+    # ---------- 4. Создание каталогов ----------
+    - name: Создать каталоги
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/ipa, mode: "0755" }
+        - { path: /etc/sssd/conf.d, mode: "0755" }
+        - { path: /var/lib/ipa-client/pki, mode: "0755" }
+        - { path: /var/lib/sss/db, mode: "0700" }
+        - { path: /var/lib/sss/mc, mode: "0755" }
+        - { path: /var/lib/sss/pipes/private, mode: "0755" }
+        - { path: /var/log/sssd, mode: "0755" }
+        - { path: /var/run/sssd, mode: "0755" }
+        - { path: "{{ students_home }}", mode: "0755" }
+        - { path: "{{ teachers_home }}", mode: "0755" }
+
+    # ---------- 5. Kerberos ----------
+    - name: Создать /etc/krb5.conf.d
+      ansible.builtin.file:
+        path: /etc/krb5.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Создать заглушку 00-default.conf
+      ansible.builtin.copy:
+        content: |
+          # Этот файл необходим для корректной работы Kerberos
+          # Он пустой, чтобы не влиять на настройки
+        dest: /etc/krb5.conf.d/00-default.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Создать /etc/krb5.conf
+      ansible.builtin.copy:
+        dest: /etc/krb5.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [libdefaults]
+              default_realm = {{ ipa_realm }}
+              dns_lookup_realm = false
+              dns_lookup_kdc = true
+              ticket_lifetime = 24h
+              forwardable = true
+              dns_canonicalize_hostname = false
+              rdns = false
+              default_ccache_name = KEYRING:persistent:%{uid}
+
+          [realms]
+              {{ ipa_realm }} = {
+                  kdc = {{ ipa_server }}
+                  admin_server = {{ ipa_server }}
+                  kpasswd_server = {{ ipa_server }}
+                  default_domain = {{ ipa_domain }}
+              }
+
+          [domain_realm]
+              .{{ ipa_domain }} = {{ ipa_realm }}
+              {{ ipa_domain }} = {{ ipa_realm }}
+
+    # ---------- 6. Проверка Kerberos ----------
+    - name: Проверить kinit
+      ansible.builtin.shell: |
+        echo "{{ ipa_password }}" | kinit admin@{{ ipa_realm }}
+        klist
+        kdestroy
+      register: kinit_result
+      changed_when: false
+      failed_when: kinit_result.rc != 0
+
+    # ---------- 7. Регистрация в IPA ----------
+    - name: Зарегистрировать машину в IPA
+      ansible.builtin.command: >
+        /sbin/ipa-client-install
+        --domain={{ ipa_domain }}
+        --server={{ ipa_server }}
+        --principal=admin
+        -w {{ ipa_password }}
+        --no-ntp
+        --mkhomedir
+        --unattended
+        --force-join
+      register: ipa_install_result
+      changed_when: ipa_install_result.rc == 0
+      failed_when: ipa_install_result.rc != 0
+
+    # ---------- 8. SSSD ----------
+    - name: Остановить SSSD перед правкой конфига
+      ansible.builtin.systemd:
+        name: sssd
+        state: stopped
+      failed_when: false
+
+    - name: Создать /etc/sssd/sssd.conf
+      ansible.builtin.copy:
+        dest: /etc/sssd/sssd.conf
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          [domain/{{ ipa_domain }}]
+          id_provider = ipa
+          ipa_server = _srv_, {{ ipa_server }}
+          ipa_domain = {{ ipa_domain }}
+          ipa_hostname = {{ full_hostname }}
+          auth_provider = ipa
+          chpass_provider = ipa
+          access_provider = ipa
+          cache_credentials = True
+          ldap_tls_cacert = /etc/ipa/ca.crt
+          krb5_store_password_if_offline = True
+          autofs_provider = ipa
+          ipa_automount_location = default
+          default_shell = /bin/bash
+
+          homedir_substring = {{ students_home }}
+          fallback_homedir = {{ teachers_home }}/%u
+
+          [sssd]
+          config_file_version = 2
+          services = nss, pam, ssh, sudo, autofs
+          domains = {{ ipa_domain }}
+
+          [nss]
+          [pam]
+          [ssh]
+          [sudo]
+
+    # ---------- 9. Autofs ----------
+    - name: Запустить ipa-client-automount
+      ansible.builtin.command: /sbin/ipa-client-automount --unattended
+      register: automount_result
+      failed_when: false
+      changed_when: automount_result.rc == 0
+
+    - name: Создать override для autofs.service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/autofs.service.d/override.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Requires=sssd.service
+          After=sssd.service
+      notify: daemon-reload
+
+    # ---------- 10. Права ----------
+    - name: Права на /etc/sssd
+      ansible.builtin.file:
+        path: /etc/sssd
+        owner: root
+        group: root
+        mode: "0711"
+
+    - name: Определить пользователя SSSD
+      ansible.builtin.set_fact:
+        sssd_user: "{{ 'sssd' if 'sssd' in ansible_facts.getent_passwd else '_sssd' }}"
+
+    - name: Права на /var/lib/sss и /var/log/sssd
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: "{{ sssd_user }}"
+        group: "{{ sssd_user }}"
+        recurse: true
+      loop:
+        - /var/lib/sss
+        - /var/log/sssd
+      failed_when: false
+
+    # ---------- 11. Запуск служб ----------
+    - name: Запустить sssd и autofs
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - sssd
+        - autofs
+
+    - name: Подождать 3 секунды
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: Проверить, что службы активны
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      register: svc_status
+      changed_when: false
+      failed_when: svc_status.stdout != "active"
+      loop:
+        - sssd
+        - autofs
+
+    # ---------- 12. Проверка работы ----------
+    - name: Очистить кэш SSSD
+      ansible.builtin.command: sss_cache -E
+      changed_when: false
+      failed_when: false
+
+    - name: Проверить keytab
+      ansible.builtin.shell: "klist -kt /etc/krb5.keytab | grep 'host/{{ full_hostname }}'"
+      register: keytab_check
+      changed_when: false
+      failed_when: false
+
+    - name: Сообщить о keytab
+      ansible.builtin.debug:
+        msg: "{{ 'Keytab OK' if keytab_check.rc == 0 else 'Keytab НЕ содержит правильный хост!' }}"
+
+    - name: Проверить пользователя student
+      ansible.builtin.command: id student
+      register: student_check
+      changed_when: false
+      failed_when: false
+
+    - name: Сообщить о student
+      ansible.builtin.debug:
+        msg: "{{ 'student найден' if student_check.rc == 0 else 'student не найден (кэш ещё не обновился)' }}"
+
+    # ---------- 13. Zabbix ----------
+    - name: Настроить Zabbix (если установлен)
+      block:
+        - name: Проверить наличие zabbix_agentd.conf
+          ansible.builtin.stat:
+            path: /etc/zabbix/zabbix_agentd.conf
+          register: zabbix_conf
+
+        - name: Прописать Server/ServerActive/Hostname
+          ansible.builtin.lineinfile:
+            path: /etc/zabbix/zabbix_agentd.conf
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            - { regexp: '^Server=', line: "Server={{ zabbix_server }}" }
+            - { regexp: '^ServerActive=', line: "ServerActive={{ zabbix_server }}" }
+            - { regexp: '^Hostname=', line: "Hostname={{ short_hostname }}" }
+          when: zabbix_conf.stat.exists
+          notify: restart zabbix
+
+    # ---------- 14. Перезапуск DM ----------
+    - name: Перезапустить дисплейный менеджер
+      ansible.builtin.systemd:
+        name: dm
+        state: restarted
+      failed_when: false
+
+    # ---------- 15. Добавить admin в wheels ----------
+    - name: Проверить наличие пользователя admin
+      ansible.builtin.command: id admin
+      register: admin_check
+      changed_when: false
+      failed_when: false
+
+    - name: Проверить наличие группы wheels
+      ansible.builtin.command: getent group wheels
+      register: wheels_check
+      changed_when: false
+      failed_when: false
+
+    - name: Добавить admin в wheels
+      ansible.builtin.user:
+        name: admin
+        groups: wheels
+        append: true
+      when:
+        - admin_check.rc == 0
+        - wheels_check.rc == 0
+      failed_when: false
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart zabbix
+      ansible.builtin.systemd:
+        name: "{{ 'zabbix-agent2' if 'zabbix-agent2' in ansible_facts.services else 'zabbix_agentd' }}"
+        state: restarted
+        enabled: true
+      failed_when: false
