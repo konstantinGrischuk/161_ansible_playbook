@@ -1,7 +1,7 @@
 ---
 # ================================================================
 # Playbook: полная настройка IPA-клиента
-# Аналог bash-скрипта fix_sssd.sh v7.0
+# Версия: 8.0 (исправленная, работает как bash-скрипт)
 # ================================================================
 
 - name: Setup IPA client
@@ -10,12 +10,12 @@
   become: true
   become_method: su
   become_user: root
+  ignore_unreachable: true
 
   vars:
     ipa_domain: "licey.loc"
     ipa_server: "ipa.{{ ipa_domain }}"
     ipa_realm: "LICEY.LOC"
-    # Пароль берём из Variable Group (Secret), не хардкодим
     ipa_password: "{{ lookup('env', 'IPA_PASSWORD') | default('', true) }}"
 
     students_home: "/mnt/home/students"
@@ -271,6 +271,9 @@
           After=sssd.service
       notify: daemon-reload
 
+    - name: Применить override autofs (flush handlers)
+      ansible.builtin.meta: flush_handlers
+
     # ---------- 10. Права ----------
     - name: Права на /etc/sssd
       ansible.builtin.file:
@@ -279,28 +282,39 @@
         group: root
         mode: "0711"
 
-    - name: Проверить, существует ли пользователь sssd
-      ansible.builtin.command: getent passwd sssd
-      register: sssd_user_check
-      changed_when: false
-      failed_when: false
+    - name: Права на /etc/sssd/sssd.conf
+      ansible.builtin.file:
+        path: /etc/sssd/sssd.conf
+        owner: root
+        group: root
+        mode: "0600"
 
-    - name: Определить пользователя SSSD
-      ansible.builtin.set_fact:
-        sssd_user: "{{ 'sssd' if sssd_user_check.rc == 0 else '_sssd' }}"
-
-    - name: Права на /var/lib/sss и /var/log/sssd
+    # ---------- 11. Полный сброс кэша SSSD ----------
+    - name: Полностью сбросить кэш SSSD
       ansible.builtin.file:
         path: "{{ item }}"
-        owner: "{{ sssd_user }}"
-        group: "{{ sssd_user }}"
-        recurse: true
+        state: absent
       loop:
-        - /var/lib/sss
+        - /var/lib/sss/db
+        - /var/lib/sss/mc
+        - /var/lib/sss/pipes
         - /var/log/sssd
       failed_when: false
 
-    # ---------- 11. Запуск служб ----------
+    - name: Пересоздать каталоги SSSD
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /var/lib/sss/db, mode: "0700" }
+        - { path: /var/lib/sss/mc, mode: "0755" }
+        - { path: /var/lib/sss/pipes/private, mode: "0755" }
+        - { path: /var/log/sssd, mode: "0755" }
+
+    # ---------- 12. Запуск служб ----------
     - name: Запустить sssd и autofs
       ansible.builtin.systemd:
         name: "{{ item }}"
@@ -310,9 +324,9 @@
         - sssd
         - autofs
 
-    - name: Подождать 3 секунды
+    - name: Подождать прогрева SSSD (10 секунд)
       ansible.builtin.pause:
-        seconds: 3
+        seconds: 10
 
     - name: Проверить, что службы активны
       ansible.builtin.command: "systemctl is-active {{ item }}"
@@ -323,11 +337,24 @@
         - sssd
         - autofs
 
-    # ---------- 12. Проверка работы ----------
-    - name: Очистить кэш SSSD
-      ansible.builtin.command: sss_cache -E
+    # ---------- 13. Прогрев кэша и проверка ----------
+    - name: Прогреть кэш SSSD (student)
+      ansible.builtin.command: getent passwd student
+      register: student_warmup
       changed_when: false
       failed_when: false
+      retries: 5
+      delay: 3
+      until: student_warmup.rc == 0
+
+    - name: Прогреть кэш SSSD (admin)
+      ansible.builtin.command: getent passwd admin
+      register: admin_warmup
+      changed_when: false
+      failed_when: false
+      retries: 5
+      delay: 3
+      until: admin_warmup.rc == 0
 
     - name: Проверить keytab
       ansible.builtin.shell: "klist -kt /etc/krb5.keytab | grep 'host/{{ full_hostname }}'"
@@ -339,17 +366,15 @@
       ansible.builtin.debug:
         msg: "{{ 'Keytab OK' if keytab_check.rc == 0 else 'Keytab НЕ содержит правильный хост!' }}"
 
-    - name: Проверить пользователя student
-      ansible.builtin.command: id student
-      register: student_check
-      changed_when: false
-      failed_when: false
-
     - name: Сообщить о student
       ansible.builtin.debug:
-        msg: "{{ 'student найден' if student_check.rc == 0 else 'student не найден (кэш ещё не обновился)' }}"
+        msg: "{{ 'student найден' if student_warmup.rc == 0 else 'student НЕ найден' }}"
 
-    # ---------- 13. Zabbix ----------
+    - name: Сообщить об admin
+      ansible.builtin.debug:
+        msg: "{{ 'admin найден' if admin_warmup.rc == 0 else 'admin НЕ найден (возможно, нет в IPA)' }}"
+
+    # ---------- 14. Zabbix ----------
     - name: Проверить наличие zabbix_agentd.conf
       ansible.builtin.stat:
         path: /etc/zabbix/zabbix_agentd.conf
@@ -367,20 +392,17 @@
       when: zabbix_conf.stat.exists
       notify: restart zabbix
 
-    # ---------- 14. Перезапуск DM ----------
+    - name: Применить изменения zabbix (flush handlers)
+      ansible.builtin.meta: flush_handlers
+
+    # ---------- 15. Перезапуск DM ----------
     - name: Перезапустить дисплейный менеджер
       ansible.builtin.systemd:
         name: dm
         state: restarted
       failed_when: false
 
-    # ---------- 15. Добавить admin в wheels ----------
-    - name: Проверить наличие пользователя admin
-      ansible.builtin.command: id admin
-      register: admin_check
-      changed_when: false
-      failed_when: false
-
+    # ---------- 16. Добавить admin в wheels ----------
     - name: Проверить наличие группы wheels
       ansible.builtin.command: getent group wheels
       register: wheels_check
@@ -393,9 +415,19 @@
         groups: wheels
         append: true
       when:
-        - admin_check.rc == 0
+        - admin_warmup.rc == 0
         - wheels_check.rc == 0
       failed_when: false
+
+    - name: Показать группы admin
+      ansible.builtin.command: id -nG admin
+      register: admin_groups
+      changed_when: false
+      failed_when: false
+
+    - name: Сообщить о группах admin
+      ansible.builtin.debug:
+        msg: "Группы admin: {{ admin_groups.stdout | default('н/д') }}"
 
   handlers:
     - name: daemon-reload
@@ -404,9 +436,9 @@
 
     - name: restart zabbix
       ansible.builtin.systemd:
-        name: "{{ 'zabbix-agent2' if zabbix_agent2.stat.exists else 'zabbix_agentd' }}"
+        name: "{{ 'zabbix-agent2' if zabbix_agent2_conf is exists else 'zabbix_agentd' }}"
         state: restarted
         enabled: true
       vars:
-        zabbix_agent2: "{{ lookup('ansible.builtin.fileglob', '/etc/zabbix/zabbix_agent2.conf') }}"
+        zabbix_agent2_conf: /etc/zabbix/zabbix_agent2.conf
       failed_when: false
