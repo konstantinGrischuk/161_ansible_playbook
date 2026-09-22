@@ -42,12 +42,21 @@
             state: present
           when: ansible_default_ipv4.address is defined
 
-    - name: 2. Проверка доступности IPA-сервера
-      wait_for:
-        host: "{{ ipa_server }}"
-        port: 88
-        timeout: 3
-      msg: "Ошибка: IPA-сервер {{ ipa_server }} недоступен по Kerberos порту (88)."
+      - name: 2. Проверка доступности IPA-сервера
+      block:
+        - name: Опрос Kerberos-порта на IPA-сервере
+          wait_for:
+            host: "{{ ipa_server }}"
+            port: 88
+            timeout: 3
+          register: ipa_port_check
+
+      rescue:
+        - name: Вывод ошибки при недоступности FreeIPA
+          assert:
+            that: false
+            fail_msg: "Ошибка: IPA-сервер {{ ipa_server }} недоступен по Kerberos порту (88)."
+
 
     - name: 3. Остановка и отключение старых служб
       service:
