@@ -1,6 +1,6 @@
 ---
 - name: Полная автоматическая настройка IPA-клиента
-  hosts: all
+  hosts: 403
   become: true
   vars:
     ipa_domain: "licey.loc"
