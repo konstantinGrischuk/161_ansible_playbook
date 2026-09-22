@@ -253,6 +253,12 @@
       failed_when: false
       changed_when: automount_result.rc == 0
 
+    - name: Создать каталог для override autofs
+      ansible.builtin.file:
+        path: /etc/systemd/system/autofs.service.d
+        state: directory
+        mode: "0755"
+
     - name: Создать override для autofs.service
       ansible.builtin.copy:
         dest: /etc/systemd/system/autofs.service.d/override.conf
@@ -273,9 +279,15 @@
         group: root
         mode: "0711"
 
+    - name: Проверить, существует ли пользователь sssd
+      ansible.builtin.command: getent passwd sssd
+      register: sssd_user_check
+      changed_when: false
+      failed_when: false
+
     - name: Определить пользователя SSSD
       ansible.builtin.set_fact:
-        sssd_user: "{{ 'sssd' if 'sssd' in ansible_facts.getent_passwd else '_sssd' }}"
+        sssd_user: "{{ 'sssd' if sssd_user_check.rc == 0 else '_sssd' }}"
 
     - name: Права на /var/lib/sss и /var/log/sssd
       ansible.builtin.file:
@@ -338,24 +350,22 @@
         msg: "{{ 'student найден' if student_check.rc == 0 else 'student не найден (кэш ещё не обновился)' }}"
 
     # ---------- 13. Zabbix ----------
-    - name: Настроить Zabbix (если установлен)
-      block:
-        - name: Проверить наличие zabbix_agentd.conf
-          ansible.builtin.stat:
-            path: /etc/zabbix/zabbix_agentd.conf
-          register: zabbix_conf
+    - name: Проверить наличие zabbix_agentd.conf
+      ansible.builtin.stat:
+        path: /etc/zabbix/zabbix_agentd.conf
+      register: zabbix_conf
 
-        - name: Прописать Server/ServerActive/Hostname
-          ansible.builtin.lineinfile:
-            path: /etc/zabbix/zabbix_agentd.conf
-            regexp: "{{ item.regexp }}"
-            line: "{{ item.line }}"
-          loop:
-            - { regexp: '^Server=', line: "Server={{ zabbix_server }}" }
-            - { regexp: '^ServerActive=', line: "ServerActive={{ zabbix_server }}" }
-            - { regexp: '^Hostname=', line: "Hostname={{ short_hostname }}" }
-          when: zabbix_conf.stat.exists
-          notify: restart zabbix
+    - name: Прописать Server/ServerActive/Hostname
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^Server=', line: "Server={{ zabbix_server }}" }
+        - { regexp: '^ServerActive=', line: "ServerActive={{ zabbix_server }}" }
+        - { regexp: '^Hostname=', line: "Hostname={{ short_hostname }}" }
+      when: zabbix_conf.stat.exists
+      notify: restart zabbix
 
     # ---------- 14. Перезапуск DM ----------
     - name: Перезапустить дисплейный менеджер
@@ -394,7 +404,9 @@
 
     - name: restart zabbix
       ansible.builtin.systemd:
-        name: "{{ 'zabbix-agent2' if 'zabbix-agent2' in ansible_facts.services else 'zabbix_agentd' }}"
+        name: "{{ 'zabbix-agent2' if zabbix_agent2.stat.exists else 'zabbix_agentd' }}"
         state: restarted
         enabled: true
+      vars:
+        zabbix_agent2: "{{ lookup('ansible.builtin.fileglob', '/etc/zabbix/zabbix_agent2.conf') }}"
       failed_when: false
