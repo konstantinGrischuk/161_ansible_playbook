@@ -6,7 +6,7 @@
     ipa_domain: "licey.loc"
     ipa_server: "ipa.licey.loc"
     ipa_realm: "LICEY.LOC"
-    ipa_password: ",tkrj,hfpbt18"
+    ipa_password: "{{ lookup('ansible.builtin.env', 'IPA_PASSWORD') | default('', true) }}"
     students_home: "/mnt/home/students"
     teachers_home: "/mnt/home/teachers"
     zabbix_server: "10.205.112.6"
