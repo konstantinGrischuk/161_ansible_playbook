@@ -1,228 +1,171 @@
 ---
-# ================================================================
-# Playbook: полная настройка IPA-клиента
-# Версия: 8.0 (исправленная, работает как bash-скрипт)
-# ================================================================
-
-- name: Setup IPA client
-  hosts: "317"
-  gather_facts: true
+- name: Полная автоматическая настройка IPA-клиента
+  hosts: all
   become: true
-  become_method: su
-  become_user: root
-  ignore_unreachable: true
-
   vars:
     ipa_domain: "licey.loc"
-    ipa_server: "ipa.{{ ipa_domain }}"
+    ipa_server: "ipa.licey.loc"
     ipa_realm: "LICEY.LOC"
-    ipa_password: "{{ lookup('env', 'IPA_PASSWORD') | default('', true) }}"
-
+    ipa_password: ",tkrj,hfpbt18"
     students_home: "/mnt/home/students"
     teachers_home: "/mnt/home/teachers"
-
     zabbix_server: "10.205.112.6"
 
   tasks:
+    - name: 0. Включение PasswordAuthentication в sshd_config
+      lineinfile:
+        path: /etc/openssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+      notify: Restart sshd
 
-    # ---------- 0. Проверки ----------
-    - name: Проверить, что IPA_PASSWORD задан
-      ansible.builtin.assert:
-        that:
-          - ipa_password | length > 0
-        fail_msg: "Переменная IPA_PASSWORD не задана"
-        success_msg: "IPA_PASSWORD задан"
+    - name: 1. Настройка имени хоста
+      block:
+        - name: Вычисление короткого имени хоста
+          set_fact:
+            short_hostname: "{{ ansible_hostname | regex_replace('\\..*$', '') }}"
 
-    - name: Проверить доступность IPA-сервера
-      ansible.builtin.command: "ping -c 1 -W 2 {{ ipa_server }}"
-      register: ping_result
-      changed_when: false
-      failed_when: ping_result.rc != 0
+        - name: Проверка формата имени хоста (pcXXX-YY)
+          debug:
+            msg: "Внимание: имя {{ short_hostname }} не соответствует формату pcXXX-YY"
+          when: not (short_hostname | regex_search('^pc[0-9]{3}-[0-9]+$'))
 
-    # ---------- 1. Hostname ----------
-    - name: Получить короткое имя хоста
-      ansible.builtin.set_fact:
-        short_hostname: "{{ ansible_hostname | default(inventory_hostname) | split('.') | first }}"
+        - name: Установка полного имени хоста (FQDN)
+          hostname:
+            name: "{{ short_hostname }}.{{ ipa_domain }}"
 
-    - name: Предупредить, если hostname не по шаблону
-      ansible.builtin.debug:
-        msg: "ВНИМАНИЕ: имя '{{ short_hostname }}' не соответствует pcXXX-YY"
-      when: not (short_hostname is match('^pc[0-9]{3}-[0-9]+$'))
+        - name: Добавление записи в /etc/hosts
+          lineinfile:
+            path: /etc/hosts
+            line: "{{ ansible_default_ipv4.address }} {{ short_hostname }}.{{ ipa_domain }} {{ short_hostname }}"
+            regexp: ".*{{ short_hostname }}.{{ ipa_domain }}.*"
+            state: present
+          when: ansible_default_ipv4.address is defined
 
-    - name: Установить полное имя хоста
-      ansible.builtin.set_fact:
-        full_hostname: "{{ short_hostname }}.{{ ipa_domain }}"
+    - name: 2. Проверка доступности IPA-сервера
+      wait_for:
+        host: "{{ ipa_server }}"
+        port: 88
+        timeout: 3
+      msg: "Ошибка: IPA-сервер {{ ipa_server }} недоступен по Kerberos порту (88)."
 
-    - name: Установить hostname через hostnamectl
-      ansible.builtin.hostname:
-        name: "{{ full_hostname }}"
-        use: systemd
-      when: ansible_fqdn != full_hostname
-
-    - name: Прописать короткое имя в /etc/hostname
-      ansible.builtin.copy:
-        content: "{{ short_hostname }}\n"
-        dest: /etc/hostname
-        owner: root
-        group: root
-        mode: "0644"
-      when: ansible_fqdn != full_hostname
-
-    - name: Добавить запись в /etc/hosts (если нет)
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        line: "{{ ansible_default_ipv4.address }} {{ full_hostname }} {{ short_hostname }}"
-        state: present
-        create: true
-      when:
-        - ansible_fqdn != full_hostname
-        - ansible_default_ipv4 is defined
-
-    # ---------- 2. Остановка служб ----------
-    - name: Остановить sssd, autofs, nscd
-      ansible.builtin.systemd:
+    - name: 3. Остановка и отключение старых служб
+      service:
         name: "{{ item }}"
         state: stopped
         enabled: false
+      failed_when: false
       loop:
         - sssd
         - autofs
         - nscd
-      failed_when: false
 
-    # ---------- 3. Удаление старой конфигурации ----------
-    - name: Запустить ipa-client-install --uninstall
-      ansible.builtin.command: /sbin/ipa-client-install --uninstall -U
-      register: uninstall_result
-      failed_when: false
-      changed_when: uninstall_result.rc == 0
+    - name: 4. Удаление старой конфигурации FreeIPA
+      block:
+        - name: Проверка наличия ipa-client-install
+          stat:
+            path: /sbin/ipa-client-install
+          register: ipa_client_install_bin
 
-    - name: Удалить старые файлы конфигурации
-      ansible.builtin.file:
+        - name: Запуск ipa-client-install --uninstall
+          command: /sbin/ipa-client-install --uninstall -U
+          failed_when: false
+          when: ipa_client_install_bin.stat.exists
+
+        - name: Очистка остаточных файлов и директорий
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/ipa
+            - /etc/sssd
+            - /var/lib/sss
+            - /var/log/sssd
+            - /var/run/sssd
+            - /etc/krb5.keytab
+            - /etc/krb5.conf
+
+    - name: 5. Создание структуры каталогов
+      file:
         path: "{{ item }}"
-        state: absent
+        state: directory
+        mode: '0755'
       loop:
         - /etc/ipa
-        - /etc/sssd
-        - /var/lib/sss
+        - /etc/sssd/conf.d
+        - /var/lib/ipa-client/pki
+        - /var/lib/sss/db
+        - /var/lib/sss/mc
+        - /var/lib/sss/pipes/private
         - /var/log/sssd
         - /var/run/sssd
-        - /etc/krb5.keytab
-        - /etc/krb5.conf
+        - "{{ students_home }}"
+        - "{{ teachers_home }}"
 
-    - name: Удалить файлы в /etc/krb5.conf.d
-      ansible.builtin.shell: "rm -f /etc/krb5.conf.d/* || true"
-      changed_when: false
+    - name: 6. Настройка Kerberos
+      block:
+        - name: Создание каталога krb5.conf.d
+          file:
+            path: /etc/krb5.conf.d
+            state: directory
+            mode: '0755'
 
-    # ---------- 4. Создание каталогов ----------
-    - name: Создать каталоги
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: directory
-        mode: "{{ item.mode }}"
-      loop:
-        - { path: /etc/ipa, mode: "0755" }
-        - { path: /etc/sssd/conf.d, mode: "0755" }
-        - { path: /var/lib/ipa-client/pki, mode: "0755" }
-        - { path: /var/lib/sss/db, mode: "0700" }
-        - { path: /var/lib/sss/mc, mode: "0755" }
-        - { path: /var/lib/sss/pipes/private, mode: "0755" }
-        - { path: /var/log/sssd, mode: "0755" }
-        - { path: /var/run/sssd, mode: "0755" }
-        - { path: "{{ students_home }}", mode: "0755" }
-        - { path: "{{ teachers_home }}", mode: "0755" }
+        - name: Создание заглушки 00-default.conf
+          copy:
+            dest: /etc/krb5.conf.d/00-default.conf
+            content: "# Файл необходим для корректной работы Kerberos\n"
+            mode: '0644'
 
-    # ---------- 5. Kerberos ----------
-    - name: Создать /etc/krb5.conf.d
-      ansible.builtin.file:
-        path: /etc/krb5.conf.d
-        state: directory
-        mode: "0755"
+        - name: Генерация основного krb5.conf
+          copy:
+            dest: /etc/krb5.conf
+            mode: '0644'
+            content: |
+              [libdefaults]
+               default_realm = {{ ipa_realm }}
+               dns_lookup_realm = false
+               dns_lookup_kdc = true
+               ticket_lifetime = 24h
+               forwardable = true
+               dns_canonicalize_hostname = false
+               rdns = false
+               default_ccache_name = KEYRING:persistent:%{uid}
+              [realms]
+               {{ ipa_realm }} = {
+               kdc = {{ ipa_server }}
+               admin_server = {{ ipa_server }}
+               kpasswd_server = {{ ipa_server }}
+               default_domain = {{ ipa_domain }}
+               }
+              [domain_realm]
+               .{{ ipa_domain }} = {{ ipa_realm }}
+               {{ ipa_domain }} = {{ ipa_realm }}
 
-    - name: Создать заглушку 00-default.conf
-      ansible.builtin.copy:
-        content: |
-          # Этот файл необходим для корректной работы Kerberos
-          # Он пустой, чтобы не влиять на настройки
-        dest: /etc/krb5.conf.d/00-default.conf
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Создать /etc/krb5.conf
-      ansible.builtin.copy:
-        dest: /etc/krb5.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [libdefaults]
-              default_realm = {{ ipa_realm }}
-              dns_lookup_realm = false
-              dns_lookup_kdc = true
-              ticket_lifetime = 24h
-              forwardable = true
-              dns_canonicalize_hostname = false
-              rdns = false
-              default_ccache_name = KEYRING:persistent:%{uid}
-
-          [realms]
-              {{ ipa_realm }} = {
-                  kdc = {{ ipa_server }}
-                  admin_server = {{ ipa_server }}
-                  kpasswd_server = {{ ipa_server }}
-                  default_domain = {{ ipa_domain }}
-              }
-
-          [domain_realm]
-              .{{ ipa_domain }} = {{ ipa_realm }}
-              {{ ipa_domain }} = {{ ipa_realm }}
-
-    # ---------- 6. Проверка Kerberos ----------
-    - name: Проверить kinit
-      ansible.builtin.shell: |
-        echo "{{ ipa_password }}" | kinit admin@{{ ipa_realm }}
-        klist
-        kdestroy
-      register: kinit_result
-      changed_when: false
-      failed_when: kinit_result.rc != 0
-
-    # ---------- 7. Регистрация в IPA ----------
-    - name: Зарегистрировать машину в IPA
-      ansible.builtin.command: >
+    - name: 7 & 8. Регистрация машины в FreeIPA
+      shell: >
         /sbin/ipa-client-install
-        --domain={{ ipa_domain }}
-        --server={{ ipa_server }}
+        --domain="{{ ipa_domain }}"
+        --server="{{ ipa_server }}"
         --principal=admin
-        -w {{ ipa_password }}
+        -w "{{ ipa_password }}"
         --no-ntp
         --mkhomedir
         --unattended
         --force-join
-      register: ipa_install_result
-      changed_when: ipa_install_result.rc == 0
-      failed_when: ipa_install_result.rc != 0
+      no_log: true
 
-    # ---------- 8. SSSD ----------
-    - name: Остановить SSSD перед правкой конфига
-      ansible.builtin.systemd:
-        name: sssd
-        state: stopped
-      failed_when: false
-
-    - name: Создать /etc/sssd/sssd.conf
-      ansible.builtin.copy:
+    - name: 9. Настройка SSSD
+      copy:
         dest: /etc/sssd/sssd.conf
+        mode: '0600'
         owner: root
         group: root
-        mode: "0600"
         content: |
           [domain/{{ ipa_domain }}]
           id_provider = ipa
           ipa_server = _srv_, {{ ipa_server }}
           ipa_domain = {{ ipa_domain }}
-          ipa_hostname = {{ full_hostname }}
+          ipa_hostname = {{ short_hostname }}.{{ ipa_domain }}
           auth_provider = ipa
           chpass_provider = ipa
           access_provider = ipa
@@ -232,91 +175,69 @@
           autofs_provider = ipa
           ipa_automount_location = default
           default_shell = /bin/bash
-
           homedir_substring = {{ students_home }}
           fallback_homedir = {{ teachers_home }}/%u
-
           [sssd]
           config_file_version = 2
           services = nss, pam, ssh, sudo, autofs
           domains = {{ ipa_domain }}
-
           [nss]
           [pam]
           [ssh]
           [sudo]
 
-    # ---------- 9. Autofs ----------
-    - name: Запустить ipa-client-automount
-      ansible.builtin.command: /sbin/ipa-client-automount --unattended
-      register: automount_result
-      failed_when: false
-      changed_when: automount_result.rc == 0
+    - name: 10. Настройка Autofs
+      block:
+        - name: Запуск настройки автодонтирования IPA
+          command: /sbin/ipa-client-automount --unattended
+          failed_when: false
 
-    - name: Создать каталог для override autofs
-      ansible.builtin.file:
-        path: /etc/systemd/system/autofs.service.d
-        state: directory
-        mode: "0755"
+        - name: Создание директории для override autofs
+          file:
+            path: /etc/systemd/system/autofs.service.d
+            state: directory
+            mode: '0755'
 
-    - name: Создать override для autofs.service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/autofs.service.d/override.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Requires=sssd.service
-          After=sssd.service
-      notify: daemon-reload
+        - name: Создание override.conf для autofs
+          copy:
+            dest: /etc/systemd/system/autofs.service.d/override.conf
+            content: |
+              [Unit]
+              Requires=sssd.service
+              After=sssd.service
+          notify: Systemd daemon-reload
 
-    - name: Применить override autofs (flush handlers)
-      ansible.builtin.meta: flush_handlers
+    - name: 11. Выставление прав доступа для SSSD
+      block:
+        - name: Определение системного пользователя SSSD
+          shell: "getent passwd | grep -E '^(sssd|_sssd):' | cut -d: -f1"
+          register: sssd_user_check
+          failed_when: false
+          changed_when: false
 
-    # ---------- 10. Права ----------
-    - name: Права на /etc/sssd
-      ansible.builtin.file:
-        path: /etc/sssd
-        owner: root
-        group: root
-        mode: "0711"
+        - name: Установка переменной sssd_user
+          set_fact:
+            sssd_user: "{{ sssd_user_check.stdout if sssd_user_check.stdout != '' else '_sssd' }}"
 
-    - name: Права на /etc/sssd/sssd.conf
-      ansible.builtin.file:
-        path: /etc/sssd/sssd.conf
-        owner: root
-        group: root
-        mode: "0600"
+        - name: Выставление прав на директории SSSD
+          file:
+            path: "{{ item.path }}"
+            owner: "{{ item.owner | default('root') }}"
+            group: "{{ item.group | default('root') }}"
+            mode: "{{ item.mode }}"
+            state: directory
+          loop:
+            - { path: '/etc/sssd', mode: '0711' }
+            - { path: '/var/lib/sss', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/lib/sss/db', mode: '0700', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/lib/sss/mc', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/lib/sss/pipes', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/lib/sss/pipes/private', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/log/sssd', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
+            - { path: '/var/run/sssd', mode: '0755', owner: "{{ sssd_user }}", group: "{{ sssd_user }}" }
 
-    # ---------- 11. Полный сброс кэша SSSD ----------
-    - name: Полностью сбросить кэш SSSD
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - /var/lib/sss/db
-        - /var/lib/sss/mc
-        - /var/lib/sss/pipes
-        - /var/log/sssd
-      failed_when: false
-
-    - name: Пересоздать каталоги SSSD
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "{{ item.mode }}"
-      loop:
-        - { path: /var/lib/sss/db, mode: "0700" }
-        - { path: /var/lib/sss/mc, mode: "0755" }
-        - { path: /var/lib/sss/pipes/private, mode: "0755" }
-        - { path: /var/log/sssd, mode: "0755" }
-
-    # ---------- 12. Запуск служб ----------
-    - name: Запустить sssd и autofs
-      ansible.builtin.systemd:
+    - name: 12. Запуск и включение служб SSSD и Autofs
+      service:
         name: "{{ item }}"
         state: started
         enabled: true
@@ -324,121 +245,57 @@
         - sssd
         - autofs
 
-    - name: Подождать прогрева SSSD (10 секунд)
-      ansible.builtin.pause:
-        seconds: 10
-
-    - name: Проверить, что службы активны
-      ansible.builtin.command: "systemctl is-active {{ item }}"
-      register: svc_status
-      changed_when: false
-      failed_when: svc_status.stdout != "active"
-      loop:
-        - sssd
-        - autofs
-
-    # ---------- 13. Прогрев кэша и проверка ----------
-    - name: Прогреть кэш SSSD (student)
-      ansible.builtin.command: getent passwd student
-      register: student_warmup
-      changed_when: false
-      failed_when: false
-      retries: 5
-      delay: 3
-      until: student_warmup.rc == 0
-
-    - name: Прогреть кэш SSSD (admin)
-      ansible.builtin.command: getent passwd admin
-      register: admin_warmup
-      changed_when: false
-      failed_when: false
-      retries: 5
-      delay: 3
-      until: admin_warmup.rc == 0
-
-    - name: Проверить keytab
-      ansible.builtin.shell: "klist -kt /etc/krb5.keytab | grep 'host/{{ full_hostname }}'"
-      register: keytab_check
-      changed_when: false
+    - name: 13. Сброс кэша SSSD
+      command: sss_cache -E
       failed_when: false
 
-    - name: Сообщить о keytab
-      ansible.builtin.debug:
-        msg: "{{ 'Keytab OK' if keytab_check.rc == 0 else 'Keytab НЕ содержит правильный хост!' }}"
+    - name: 14. Опциональная настройка Zabbix агента
+      block:
+        - name: Проверка наличия конфига Zabbix
+          stat:
+            path: /etc/zabbix/zabbix_agentd.conf
+          register: zabbix_conf
 
-    - name: Сообщить о student
-      ansible.builtin.debug:
-        msg: "{{ 'student найден' if student_warmup.rc == 0 else 'student НЕ найден' }}"
+        - name: Конфигурирование параметров Zabbix
+          lineinfile:
+            path: /etc/zabbix/zabbix_agentd.conf
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            - { regexp: '^Server=', line: "Server={{ zabbix_server }}" }
+            - { regexp: '^ServerActive=', line: "ServerActive={{ zabbix_server }}" }
+            - { regexp: '^Hostname=', line: "Hostname={{ short_hostname }}" }
+          when: zabbix_conf.stat.exists
+          notify: Restart Zabbix
 
-    - name: Сообщить об admin
-      ansible.builtin.debug:
-        msg: "{{ 'admin найден' if admin_warmup.rc == 0 else 'admin НЕ найден (возможно, нет в IPA)' }}"
-
-    # ---------- 14. Zabbix ----------
-    - name: Проверить наличие zabbix_agentd.conf
-      ansible.builtin.stat:
-        path: /etc/zabbix/zabbix_agentd.conf
-      register: zabbix_conf
-
-    - name: Прописать Server/ServerActive/Hostname
-      ansible.builtin.lineinfile:
-        path: /etc/zabbix/zabbix_agentd.conf
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^Server=', line: "Server={{ zabbix_server }}" }
-        - { regexp: '^ServerActive=', line: "ServerActive={{ zabbix_server }}" }
-        - { regexp: '^Hostname=', line: "Hostname={{ short_hostname }}" }
-      when: zabbix_conf.stat.exists
-      notify: restart zabbix
-
-    - name: Применить изменения zabbix (flush handlers)
-      ansible.builtin.meta: flush_handlers
-
-    # ---------- 15. Перезапуск DM ----------
-    - name: Перезапустить дисплейный менеджер
-      ansible.builtin.systemd:
+    - name: 15. Перезапуск дисплейного менеджера
+      service:
         name: dm
         state: restarted
       failed_when: false
 
-    # ---------- 16. Добавить admin в wheels ----------
-    - name: Проверить наличие группы wheels
-      ansible.builtin.command: getent group wheels
-      register: wheels_check
-      changed_when: false
-      failed_when: false
-
-    - name: Добавить admin в wheels
-      ansible.builtin.user:
+    - name: 17. Добавление доменного админа в локальную группу wheels
+      user:
         name: admin
         groups: wheels
         append: true
-      when:
-        - admin_warmup.rc == 0
-        - wheels_check.rc == 0
       failed_when: false
-
-    - name: Показать группы admin
-      ansible.builtin.command: id -nG admin
-      register: admin_groups
-      changed_when: false
-      failed_when: false
-
-    - name: Сообщить о группах admin
-      ansible.builtin.debug:
-        msg: "Группы admin: {{ admin_groups.stdout | default('н/д') }}"
 
   handlers:
-    - name: daemon-reload
-      ansible.builtin.systemd:
+    - name: Restart sshd
+      service:
+        name: sshd
+        state: restarted
+
+    - name: Systemd daemon-reload
+      systemd:
         daemon_reload: true
 
-    - name: restart zabbix
-      ansible.builtin.systemd:
-        name: "{{ 'zabbix-agent2' if zabbix_agent2_conf is exists else 'zabbix_agentd' }}"
-        state: restarted
-        enabled: true
-      vars:
-        zabbix_agent2_conf: /etc/zabbix/zabbix_agent2.conf
+    - name: Restart Zabbix
+      shell: |
+        if systemctl list-unit-files | grep -q "zabbix_agentd.service"; then
+          systemctl enable zabbix_agentd && systemctl restart zabbix_agentd
+        elif systemctl list-unit-files | grep -q "zabbix-agent2.service"; then
+          systemctl enable zabbix-agent2 && systemctl restart zabbix-agent2
+        fi
       failed_when: false
