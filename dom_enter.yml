@@ -12,6 +12,9 @@
     zabbix_server: "10.205.112.6"
 
   tasks:
+   - name: ОПАСНО: Вывод пароля IPA в открытый вид
+      debug:
+        var: ipa_password
     - name: 0. Включение PasswordAuthentication в sshd_config
       ansible.builtin.lineinfile:
         path: /etc/openssh/sshd_config
