@@ -1,6 +1,6 @@
 ---
 - name: Полная автоматическая настройка IPA-клиента
-  hosts: 317
+  hosts: "317"
   become: true
   ignore_unreachable: true
 
