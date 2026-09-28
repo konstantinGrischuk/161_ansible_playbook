@@ -1,8 +1,19 @@
 ---
-- name: Настройка локального кэша для доменных пользователей
+- name: Настройка локального кэша и SSSD (Класс 403)
   hosts: "403"
-  become: yes  # Выполнять под root
+  become: yes
   tasks:
+
+    - name: Создание базовых каталогов с правами Sticky bit (1777)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '1777'
+      loop:
+        - /var/tmp/local_home
+        - /var/tmp/local_home/students
+        - /var/tmp/local_home/teachers
+        - /var/tmp/user_cache
 
     - name: Создание скрипта перенаправления кэша в /etc/profile.d/
       ansible.builtin.copy:
@@ -12,26 +23,42 @@
         mode: '0755'
         content: |
           #!/bin/bash
-          # Скрипт создан через Ansible
-          LOCAL_HOME="/var/tmp/local_home/${USER}"
-          
-          if [ ! -d "$LOCAL_HOME" ]; then
-              mkdir -p "$LOCAL_HOME"
-              chmod 700 "$LOCAL_HOME"
-              cp -rT /etc/skel/ "$LOCAL_HOME" # Копируем чистый рабочий стол
-          fi
-
           LOCAL_CACHE="/var/tmp/user_cache/${USER}"
-
           if [ ! -d "$LOCAL_CACHE" ]; then
               mkdir -p "$LOCAL_CACHE"
               chmod 700 "$LOCAL_CACHE"
           fi
-
           export XDG_CACHE_HOME="$LOCAL_CACHE"
 
-    - name: Автоматическая очистка кэша старых сессий при загрузке ПК (опционально)
+    - name: Удаление блокирующей строки override_homedir из sssd.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sssd/sssd.conf
+        regexp: '^override_homedir ='
+        state: absent
+      register: sssd_cleanup
+
+    - name: Настройка homedir_substring и fallback_homedir (%o)
+      ansible.builtin.blockinfile:
+        path: /etc/sssd/sssd.conf
+        insertafter: '^default_shell = /bin/bash'
+        block: |
+          homedir_substring = /mnt/home
+          fallback_homedir = /var/tmp/local_home/%o
+      register: sssd_updated
+
+    - name: Сброс кэша домена и перезапуск службы SSSD
+      ansible.builtin.shell: |
+        sss_cache -E
+        systemctl restart sssd
+      when: sssd_cleanup.changed or sssd_updated.changed
+
+    - name: Автоматическая очистка кэша пользователей при загрузке ПК
       ansible.builtin.cron:
         name: "Очистка локального кэша пользователей при загрузке"
         special_time: reboot
         job: "rm -rf /var/tmp/user_cache/*"
+
+    - name: Перезапуск Autofs
+      ansible.builtin.systemd:
+        name: autofs
+        state: restarted
