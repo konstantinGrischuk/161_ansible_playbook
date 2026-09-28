@@ -13,6 +13,14 @@
         content: |
           #!/bin/bash
           # Скрипт создан через Ansible
+          LOCAL_HOME="/var/tmp/local_home/${USER}"
+          
+          if [ ! -d "$LOCAL_HOME" ]; then
+              mkdir -p "$LOCAL_HOME"
+              chmod 700 "$LOCAL_HOME"
+              cp -rT /etc/skel/ "$LOCAL_HOME" # Копируем чистый рабочий стол
+          fi
+
           LOCAL_CACHE="/var/tmp/user_cache/${USER}"
 
           if [ ! -d "$LOCAL_CACHE" ]; then
