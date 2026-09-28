@@ -1,0 +1,29 @@
+---
+- name: Настройка локального кэша для доменных пользователей
+  hosts: all
+  become: yes  # Выполнять под root
+  tasks:
+
+    - name: Создание скрипта перенаправления кэша в /etc/profile.d/
+      ansible.builtin.copy:
+        dest: /etc/profile.d/redirect_cache.sh
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Скрипт создан через Ansible
+          LOCAL_CACHE="/var/tmp/user_cache/${USER}"
+
+          if [ ! -d "$LOCAL_CACHE" ]; then
+              mkdir -p "$LOCAL_CACHE"
+              chmod 700 "$LOCAL_CACHE"
+          fi
+
+          export XDG_CACHE_HOME="$LOCAL_CACHE"
+
+    - name: Автоматическая очистка кэша старых сессий при загрузке ПК (опционально)
+      ansible.builtin.cron:
+        name: "Очистка локального кэша пользователей при загрузке"
+        special_time: reboot
+        job: "rm -rf /var/tmp/user_cache/*"
