@@ -1,6 +1,6 @@
 ---
 - name: Развернуть и запустить fix_sssd.sh на клиентах
-  hosts: "403"
+  hosts: "317"
   become: yes
   gather_facts: no
 
