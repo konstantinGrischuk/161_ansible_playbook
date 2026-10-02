@@ -1,6 +1,6 @@
 ---
 - name: Install Code::Blocks on 403 group PCs
-  hosts: "403"
+  hosts: "317"
   become: yes
   gather_facts: false
   ignore_unreachable: yes
