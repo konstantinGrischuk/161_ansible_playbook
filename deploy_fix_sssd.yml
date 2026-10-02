@@ -1,6 +1,6 @@
 ---
 - name: Развернуть и запустить fix_sssd.sh на клиентах
-  hosts: "317"
+  hosts: "403"
   become: yes
   gather_facts: no
 
@@ -503,3 +503,195 @@
     - name: Показать вывод скрипта
       ansible.builtin.debug:
         var: fix_result.stdout_lines
+        # ================================================================
+    # 18. НАСТРОЙКА ПРОКСИ ПО ГРУППАМ
+    # ================================================================
+
+    - name: Создать /usr/local/bin/setup_proxy_by_group.sh
+      ansible.builtin.copy:
+        dest: /usr/local/bin/setup_proxy_by_group.sh
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # /usr/local/bin/setup_proxy_by_group.sh
+          #
+          # Настраивает прокси-сервер в зависимости от группы пользователя.
+          #
+          # Что делает:
+          #   1. Удаляет глобальные строки HTTP_PROXY/HTTPS_PROXY/FTP_PROXY/NO_PROXY
+          #      из /etc/sysconfig/network (с резервной копией).
+          #   2. Отключает /etc/profile.d/proxy.sh и /etc/profile.d/proxy.csh,
+          #      которые прописывают прокси ВСЕМ пользователям.
+          #   3. Создаёт /etc/profile.d/proxy_by_group.sh, который:
+          #        - группе students  → выставляет прокси
+          #        - группе teachers  → убирает прокси (прямой доступ)
+          #        - остальным        → убирает прокси
+          #
+          # Запуск: от root.
+
+          set -e
+
+          # ================================================================
+          # КОНФИГУРАЦИЯ
+          # ================================================================
+
+          STUDENT_PROXY="http://10.0.2.52:3128"
+          STUDENT_NO_PROXY="localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+          SYSCTL_FILE="/etc/sysconfig/network"
+          PROFILE_SCRIPT="/etc/profile.d/proxy_by_group.sh"
+          BACKUP_FILE="/etc/sysconfig/network.bak.$(date +%Y%m%d-%H%M%S)"
+          TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+
+          LEGACY_PROXY_FILES=(
+              "/etc/profile.d/proxy.sh"
+              "/etc/profile.d/proxy.csh"
+          )
+
+          # ================================================================
+          # ПРОВЕРКИ
+          # ================================================================
+
+          if [ "$EUID" -ne 0 ]; then
+              echo "Ошибка: скрипт должен запускаться от root"
+              exit 1
+          fi
+
+          if [ ! -f "$SYSCTL_FILE" ]; then
+              echo "Ошибка: $SYSCTL_FILE не найден"
+              exit 1
+          fi
+
+          echo "================================================================"
+          echo "Настройка прокси по группам"
+          echo "================================================================"
+
+          # ================================================================
+          # ШАГ 1. УДАЛЯЕМ ПРОКСИ ИЗ /etc/sysconfig/network
+          # ================================================================
+
+          echo ""
+          echo "[1/3] Очистка $SYSCTL_FILE от глобальных прокси..."
+
+          cp -a "$SYSCTL_FILE" "$BACKUP_FILE"
+          echo "  Резервная копия: $BACKUP_FILE"
+
+          sed -i -E '/^[[:space:]]*(HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|NO_PROXY|http_proxy|https_proxy|ftp_proxy|no_proxy)[[:space:]]*=/d' "$SYSCTL_FILE"
+
+          echo "  Строки прокси удалены"
+          echo ""
+          echo "  --- Текущее содержимое $SYSCTL_FILE ---"
+          cat "$SYSCTL_FILE"
+          echo "  ---------------------------------------"
+
+          # ================================================================
+          # ШАГ 2. ОТКЛЮЧАЕМ LEGACY-СКРИПТЫ В /etc/profile.d/
+          # ================================================================
+
+          echo ""
+          echo "[2/3] Отключение legacy-скриптов, прописывающих прокси всем..."
+
+          DISABLED_ANY=0
+
+          for LEGACY_FILE in "${LEGACY_PROXY_FILES[@]}"; do
+              if [ -f "$LEGACY_FILE" ]; then
+                  DISABLED_NAME="${LEGACY_FILE}.disabled.${TIMESTAMP}"
+                  mv "$LEGACY_FILE" "$DISABLED_NAME"
+                  echo "  Отключён: $LEGACY_FILE → $DISABLED_NAME"
+                  DISABLED_ANY=1
+              else
+                  echo "  Не найден (уже отключён?): $LEGACY_FILE"
+              fi
+          done
+
+          if [ "$DISABLED_ANY" -eq 0 ]; then
+              echo "  Legacy-скриптов не найдено — ничего отключать не нужно"
+          fi
+
+          echo ""
+          echo "  Проверка /etc/profile.d/ на другие источники прокси..."
+
+          OTHER_PROXY_FILES=$(grep -l -E '(export|unset).*(http_proxy|https_proxy|ftp_proxy|no_proxy|HTTP_PROXY|HTTPS_PROXY|FTP_PROXY|NO_PROXY)' \
+              /etc/profile.d/*.sh 2>/dev/null | grep -v "$PROFILE_SCRIPT" || true)
+
+          if [ -n "$OTHER_PROXY_FILES" ]; then
+              echo "  ВНИМАНИЕ: найдены другие скрипты с прокси:"
+              echo "$OTHER_PROXY_FILES" | while read -r f; do
+                  echo "    - $f"
+              done
+              echo "  Проверьте их вручную — возможно, они тоже перебивают групповую логику."
+          else
+              echo "  Других источников прокси не найдено"
+          fi
+
+          # ================================================================
+          # ШАГ 3. СОЗДАЁМ СКРИПТ /etc/profile.d/proxy_by_group.sh
+          # ================================================================
+
+          echo ""
+          echo "[3/3] Создание $PROFILE_SCRIPT..."
+
+          cat > "$PROFILE_SCRIPT" << 'PROFILE_EOF'
+          #!/bin/bash
+          # /etc/profile.d/proxy_by_group.sh
+          #
+          # Настраивает переменные окружения прокси в зависимости от группы пользователя.
+          # Работает при каждом входе в систему (login shell, su -, ssh).
+
+          STUDENT_PROXY="http://10.0.2.52:3128"
+          STUDENT_NO_PROXY="localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+          # Принудительно очищаем все прокси-переменные
+          unset HTTP_PROXY HTTPS_PROXY FTP_PROXY NO_PROXY
+          unset http_proxy https_proxy ftp_proxy no_proxy
+
+          USER_GROUPS=$(id -nG "$USER" 2>/dev/null)
+
+          if echo "$USER_GROUPS" | tr ' ' '\n' | grep -qx "students"; then
+              export HTTP_PROXY="$STUDENT_PROXY"
+              export HTTPS_PROXY="$STUDENT_PROXY"
+              export FTP_PROXY="$STUDENT_PROXY"
+              export NO_PROXY="$STUDENT_NO_PROXY"
+
+              export http_proxy="$STUDENT_PROXY"
+              export https_proxy="$STUDENT_PROXY"
+              export ftp_proxy="$STUDENT_PROXY"
+              export no_proxy="$STUDENT_NO_PROXY"
+          fi
+          PROFILE_EOF
+
+          chmod 755 "$PROFILE_SCRIPT"
+          chown root:root "$PROFILE_SCRIPT"
+
+          echo "  Скрипт создан и сделан исполняемым"
+
+          # ================================================================
+          # ИТОГИ
+          # ================================================================
+
+          echo ""
+          echo "================================================================"
+          echo "Готово!"
+          echo "================================================================"
+          echo "Что сделано:"
+          echo "  1. Из $SYSCTL_FILE удалены глобальные прокси"
+          echo "  2. Отключены legacy-скрипты в /etc/profile.d/ (proxy.sh, proxy.csh)"
+          echo "  3. Создан $PROFILE_SCRIPT"
+          echo ""
+          echo "Логика прокси:"
+          echo "  students → $STUDENT_PROXY"
+          echo "  teachers → без прокси"
+          echo "  остальные → без прокси"
+          echo "================================================================"
+
+    - name: Запустить setup_proxy_by_group.sh
+      ansible.builtin.command:
+        cmd: /usr/local/bin/setup_proxy_by_group.sh
+      register: proxy_result
+      changed_when: true
+
+    - name: Показать вывод настройки прокси
+      ansible.builtin.debug:
+        var: proxy_result.stdout_lines
