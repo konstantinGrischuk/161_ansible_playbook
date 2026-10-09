@@ -191,6 +191,7 @@
               -w "$IPA_PASSWORD" \
               --no-ntp \
               --mkhomedir \
+              --enable-dns-updates \
               --unattended \
               --force-join 2>&1; then
               log_ok "Машина успешно зарегистрирована в IPA"
