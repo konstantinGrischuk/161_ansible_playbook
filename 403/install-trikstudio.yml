@@ -27,21 +27,21 @@
       until: apt_update is success
       ignore_unreachable: true
 
-    - name: Install TRIK Studio package
+    - name: Install TRIK Studio package (Correct case)
       community.general.apt_rpm:
-        pkg: trik-studio
+        pkg: trikStudio
         state: present
       environment: "{{ proxy_env }}"
       register: install_result
       ignore_unreachable: true
-      # Защита от ложного падения таски из-за варнингов "egrep is obsolescent" в ALT Linux:
+      # Обход ложных падений таски из-за варнингов egrep в ALT Linux:
       failed_when:
         - install_result.failed
         - "not ('egrep: warning' in install_result.msg and install_result.rc | default(0) == 0)"
 
     - name: Query installed TRIK Studio version
       ansible.builtin.command:
-        cmd: rpm -q --qf '%{VERSION}' trik-studio
+        cmd: rpm -q --qf '%{VERSION}' trikStudio
       register: ts_ver
       changed_when: false
       failed_when: false
