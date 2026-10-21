@@ -3,7 +3,6 @@
   hosts: "403"
   become: true
   gather_facts: false
-  ignore_unreachable: true
 
   vars:
     proxy_url: "http://10.0.2.52:3128"
@@ -18,14 +17,15 @@
       NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
 
   tasks:
-    - name: Update APT cache
+    - name: Update APT cache safely
       community.general.apt_rpm:
         update_cache: true
       environment: "{{ proxy_env }}"
       register: apt_update
-      retries: 5
+      retries: 3
       delay: 10
       until: apt_update is success
+      ignore_unreachable: true # Пропустит хост, если он выключен
 
     - name: Install Wireshark package
       community.general.apt_rpm:
@@ -33,6 +33,11 @@
         state: present
       environment: "{{ proxy_env }}"
       register: install_result
+      ignore_unreachable: true
+      # Игнорируем ложные сбои из-за варнингов egrep в stderr:
+      failed_when: 
+        - install_result.failed
+        - "'E: Установка завершена неудачно' in install_result.msg or 'E: Unable to fetch some archives' in install_result.msg or install_result.msg == ''"
 
     - name: Query installed Wireshark version
       ansible.builtin.command:
@@ -40,9 +45,10 @@
       register: ws_ver
       changed_when: false
       failed_when: false
+      ignore_unreachable: true
 
     - name: Report Wireshark version per host
       ansible.builtin.debug:
         msg: >-
           pc={{ inventory_hostname }}
-          wireshark={{ ws_ver.stdout if ws_ver.rc == 0 else 'NOT INSTALLED' }}
+          wireshark={{ ws_ver.stdout if (ws_ver.rc is defined and ws_ver.rc == 0) else 'NOT INSTALLED/UNREACHABLE' }}
