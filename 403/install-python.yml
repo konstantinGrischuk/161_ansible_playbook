@@ -1,6 +1,6 @@
 ---
 - name: Install Python and IDEs for EGE on 403 group PCs
-  hosts: "317"
+  hosts: "403"
   become: yes
   gather_facts: false
   ignore_unreachable: yes
