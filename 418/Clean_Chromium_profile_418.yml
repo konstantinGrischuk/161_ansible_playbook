@@ -1,0 +1,38 @@
+---
+- name: Clean Chromium profile on 402 group PCs
+  hosts: "418"
+  become: yes
+  gather_facts: false
+  ignore_unreachable: yes
+
+  vars:
+    proxy_env:
+      http_proxy: "http://10.0.2.52:3128"
+      https_proxy: "http://10.0.2.52:3128"
+      ftp_proxy: "http://10.0.2.52:3128"
+      HTTP_PROXY: "http://10.0.2.52:3128"
+      HTTPS_PROXY: "http://10.0.2.52:3128"
+      FTP_PROXY: "http://10.0.2.52:3128"
+      no_proxy: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+      NO_PROXY: "localhost,127.0.0.1,.local,10.0.0.0/8,.licey.loc"
+
+  tasks:
+    - name: Remove Chromium config directories (all locations)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/home/student/.config/chromium"
+        - "/home/student/.cache/chromium"
+        - "/mnt/home/students/student/.config/chromium"
+        - "/mnt/home/students/student/.cache/chromium"
+
+    - name: Verify directories are removed
+      ansible.builtin.command: "ls -d /home/student/.config/chromium /home/student/.cache/chromium /mnt/home/students/student/.config/chromium /mnt/home/students/student/.cache/chromium"
+      register: dir_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show cleanup status
+      ansible.builtin.debug:
+        msg: "pc={{ inventory_hostname }} status={{ 'CLEANED (all paths)' if dir_check.rc != 0 else 'SOME DIRS STILL EXIST' }}"
