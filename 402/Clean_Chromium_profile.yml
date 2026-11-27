@@ -6,7 +6,9 @@
   ignore_unreachable: yes
 
   vars:
-    target_user: "student"
+    # ВАЖНО: проверьте, что здесь правильный пользователь.
+    # Если на ПК вход под 'user', а не 'student', измените это.
+    target_user: "user" 
     proxy_env:
       http_proxy: "http://10.0.2.52:3128"
       https_proxy: "http://10.0.2.52:3128"
